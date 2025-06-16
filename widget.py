@@ -12,6 +12,7 @@ class UserControlInputWidget:
         ----------
         model : Any
             Prediction model that exposes a ``predict`` method.
+
         user_control_columns : dict
             Dictionary specifying columns to control. Keys are "int" or "float"
             and values are ``{column_name: step}`` mappings describing the input
@@ -28,6 +29,7 @@ class UserControlInputWidget:
         self.highlight_columns = highlight_columns or []
 
         # Keep columns attribute for compatibility with prediction stage
+
         int_cols = list(user_control_columns.get("int", {}).keys())
         float_cols = list(user_control_columns.get("float", {}).keys())
         self.columns = int_cols + float_cols
@@ -52,6 +54,7 @@ class UserControlInputWidget:
 
     def _build_ui(self):
         widget_list = []
+
         for dtype, cols in self.user_control_columns.items():
             for col, step in cols.items():
                 series = self.reference[col] if col in self.reference else pd.Series(dtype=float)
@@ -72,6 +75,7 @@ class UserControlInputWidget:
 
                 self.widgets_dict[col] = input_widget
                 widget_list.append(widgets.HBox([label, input_widget]))
+
 
         buttons = widgets.HBox([self.submit_button, self.predict_button])
         form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
@@ -211,6 +215,7 @@ class UserControlInputWidget:
 # Example usage (Replace with actual model and reference data)
 # xgb_model = trained_xgb_model
 # reference_df = pd.read_csv('training_data.csv')
+
 # control_columns = {
 #     'int': {'충진_하단': 1},
 #     'float': {'충진_중단': 0.5, '충진_상단': 0.1},
@@ -219,5 +224,7 @@ class UserControlInputWidget:
 #     model=xgb_model,
 #     user_control_columns=control_columns,
 #     reference=reference_df,
+
 #     highlight_columns=list(control_columns.get('int', {}).keys()) + list(control_columns.get('float', {}).keys()),
+
 # )
