@@ -30,31 +30,42 @@ class UserControlInputWidget:
         self.total_df = pd.DataFrame(columns=self.columns)
 
         # User input widgets generated from provided columns
-        self.input_widgets = {}
-        for col in self.user_control_columns:
-            mean_val = reference[col].mean() if col in reference else 0
-            self.input_widgets[col] = widgets.FloatText(
-                description=col,
-                value=round(float(mean_val), 3)
-            )
+        self.widgets_dict = {}
 
         # Buttons
-        self.submit_button = widgets.Button(description='Submit', button_style='success')
-        self.predict_button = widgets.Button(description='Predict', button_style='info')
+        self.submit_button = widgets.Button(description="Submit", button_style="success")
+        self.predict_button = widgets.Button(description="Predict", button_style="info")
         self.submit_button.on_click(self._on_submit)
         self.predict_button.on_click(self._on_predict)
 
         self.output = widgets.Output()
         self.df_output = widgets.Output()
+        self.delete_output = widgets.Output()
 
         self.delete_buttons = []
 
-        self._display_widgets()
+        self._build_ui()
 
-    def _display_widgets(self):
-        inputs = widgets.VBox(list(self.input_widgets.values()))
+    def _build_ui(self):
+        widget_list = []
+        for col in self.user_control_columns:
+            series = self.reference[col] if col in self.reference else pd.Series(dtype=float)
+            mean_val = series.mean() if not series.empty else 0
+            min_val = series.min() if not series.empty else 0
+            max_val = series.max() if not series.empty else 0
+
+            label_style = 'color:blue; font-weight:bold;' if col in self.highlight_columns else ''
+            label = widgets.HTML(
+                value=f"<span style='{label_style}'>{col}</span> ({min_val:.2f} ~ {max_val:.2f})",
+                layout=widgets.Layout(width='500px')
+            )
+            float_input = widgets.FloatText(value=round(float(mean_val), 3))
+            self.widgets_dict[col] = float_input
+            widget_list.append(widgets.HBox([label, float_input]))
+
         buttons = widgets.HBox([self.submit_button, self.predict_button])
-        display(inputs, buttons, self.output, self.df_output)
+        form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
+        display(form)
 
     def _calculate_dependent_columns(self, df):
         # Modular calculation function
@@ -103,7 +114,7 @@ class UserControlInputWidget:
 
     def _on_submit(self, b):
         # Gather inputs
-        input_data = {col: widget.value for col, widget in self.input_widgets.items()}
+        input_data = {col: widget.value for col, widget in self.widgets_dict.items()}
         input_df = pd.DataFrame([input_data], columns=self.columns)
 
         # Calculate dependent columns
@@ -131,7 +142,7 @@ class UserControlInputWidget:
 
     def _display_delete_buttons(self):
         buttons_box = widgets.HBox(self.delete_buttons)
-        with self.output:
+        with self.delete_output:
             clear_output()
             display(buttons_box)
 
