@@ -126,9 +126,22 @@ class UserControlInputWidget:
         # Add to total DataFrame
         self.total_df = pd.concat([self.total_df, input_df], ignore_index=True)
 
-        # Add delete button
-        delete_button = widgets.Button(description=f"Delete Row {len(self.total_df)-1}", button_style='danger', layout=widgets.Layout(width='120px'))
-        delete_button.on_click(lambda btn, idx=len(self.total_df)-1: self._delete_row(idx))
+        # Add delete button for the new row
+        new_idx = len(self.total_df) - 1
+        delete_button = widgets.Button(
+            description=f"Delete Row {new_idx}",
+            button_style="danger",
+            layout=widgets.Layout(width="120px"),
+        )
+
+        # Store the index on the button so the callback always has the current
+        # value even after other rows are deleted.
+        delete_button.idx = new_idx
+
+        def handle_click(btn):
+            self._delete_row(btn.idx)
+
+        delete_button.on_click(handle_click)
         self.delete_buttons.append(delete_button)
 
         self._display_delete_buttons()
@@ -148,13 +161,16 @@ class UserControlInputWidget:
 
     def _delete_row(self, idx):
         # Delete row from DataFrame
+        if idx >= len(self.total_df):
+            return
+
         self.total_df = self.total_df.drop(index=idx).reset_index(drop=True)
         del self.delete_buttons[idx]
 
-        # Reset button labels and handlers
+        # Reset button labels and stored indices without reattaching handlers
         for i, btn in enumerate(self.delete_buttons):
             btn.description = f"Delete Row {i}"
-            btn.on_click(lambda btn, idx=i: self._delete_row(idx))
+            btn.idx = i
 
         self._display_delete_buttons()
         self._style_dataframe()
