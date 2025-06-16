@@ -2,36 +2,70 @@ import pandas as pd
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 
-class UserControlWidget:
-    def __init__(self, model, columns):
-        self.model = model
-        self.columns = columns
-        self.total_df = pd.DataFrame(columns=columns)
+class UserControlInputWidget:
+    """Interactive widget for collecting user input and performing prediction."""
 
-        # User input widgets
-        self.input_widgets = {
-            '충진_하단': widgets.FloatText(description='충진_하단'),
-            '충진_중단': widgets.FloatText(description='충진_중단'),
-            '충진_상단': widgets.FloatText(description='충진_상단'),
-        }
+    def __init__(self, model, user_control_columns, reference: pd.DataFrame, highlight_columns=None):
+        """Create the widget.
+
+        Parameters
+        ----------
+        model : Any
+            Prediction model that exposes a ``predict`` method.
+        user_control_columns : list[str]
+            Columns that should be directly controlled through widgets.
+        reference : pandas.DataFrame
+            Reference data used for calculating default values and highlight ranges.
+        highlight_columns : list[str], optional
+            Columns to highlight based on reference statistics.
+        """
+
+        self.model = model
+        self.user_control_columns = user_control_columns
+        self.reference = reference
+        self.highlight_columns = highlight_columns or []
+
+        # Keep columns attribute for compatibility with prediction stage
+        self.columns = list(user_control_columns)
+        self.total_df = pd.DataFrame(columns=self.columns)
+
+        # User input widgets generated from provided columns
+        self.widgets_dict = {}
 
         # Buttons
-        self.submit_button = widgets.Button(description='Submit', button_style='success')
-        self.predict_button = widgets.Button(description='Predict', button_style='info')
+        self.submit_button = widgets.Button(description="Submit", button_style="success")
+        self.predict_button = widgets.Button(description="Predict", button_style="info")
         self.submit_button.on_click(self._on_submit)
         self.predict_button.on_click(self._on_predict)
 
         self.output = widgets.Output()
         self.df_output = widgets.Output()
+        self.delete_output = widgets.Output()
 
         self.delete_buttons = []
 
-        self._display_widgets()
+        self._build_ui()
 
-    def _display_widgets(self):
-        inputs = widgets.VBox(list(self.input_widgets.values()))
+    def _build_ui(self):
+        widget_list = []
+        for col in self.user_control_columns:
+            series = self.reference[col] if col in self.reference else pd.Series(dtype=float)
+            mean_val = series.mean() if not series.empty else 0
+            min_val = series.min() if not series.empty else 0
+            max_val = series.max() if not series.empty else 0
+
+            label_style = 'color:blue; font-weight:bold;' if col in self.highlight_columns else ''
+            label = widgets.HTML(
+                value=f"<span style='{label_style}'>{col}</span> ({min_val:.2f} ~ {max_val:.2f})",
+                layout=widgets.Layout(width='500px')
+            )
+            float_input = widgets.FloatText(value=round(float(mean_val), 3))
+            self.widgets_dict[col] = float_input
+            widget_list.append(widgets.HBox([label, float_input]))
+
         buttons = widgets.HBox([self.submit_button, self.predict_button])
-        display(inputs, buttons, self.output, self.df_output)
+        form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
+        display(form)
 
     def _calculate_dependent_columns(self, df):
         # Modular calculation function
@@ -41,12 +75,14 @@ class UserControlWidget:
         ]
         for calc_func in calculations:
             df = calc_func(df)
+        # Ensure internal column order reflects calculated columns
+        self.columns = list(df.columns)
         return df
 
     def _validate_input(self, df):
         # Separate validation function
         errors = []
-        if (df['장입Total'] != 16).any():
+        if '장입Total' in df.columns and (df['장입Total'] != 16).any():
             errors.append("'장입Total'은 반드시 16이어야 합니다.")
         return errors
 
@@ -55,16 +91,30 @@ class UserControlWidget:
         def highlight_invalid(val):
             return 'background-color: red' if val != 16 else ''
 
-        styled_df = self.total_df.style.applymap(
-            highlight_invalid, subset=['장입Total']
-        )
+        styled_df = self.total_df.style
+
+        # Highlight 장입Total validity if present
+        if '장입Total' in self.total_df.columns:
+            styled_df = styled_df.applymap(highlight_invalid, subset=['장입Total'])
+
+        # Highlight user specified columns based on reference statistics
+        for col in self.highlight_columns:
+            if col in self.total_df.columns and col in self.reference.columns:
+                mean = self.reference[col].mean()
+                std = self.reference[col].std()
+
+                def highlight_range(val, m=mean, s=std):
+                    return 'background-color: yellow' if val < m - s or val > m + s else ''
+
+                styled_df = styled_df.applymap(highlight_range, subset=[col])
+
         with self.df_output:
             clear_output()
             display(styled_df)
 
     def _on_submit(self, b):
         # Gather inputs
-        input_data = {col: widget.value for col, widget in self.input_widgets.items()}
+        input_data = {col: widget.value for col, widget in self.widgets_dict.items()}
         input_df = pd.DataFrame([input_data], columns=self.columns)
 
         # Calculate dependent columns
@@ -92,7 +142,7 @@ class UserControlWidget:
 
     def _display_delete_buttons(self):
         buttons_box = widgets.HBox(self.delete_buttons)
-        with self.output:
+        with self.delete_output:
             clear_output()
             display(buttons_box)
 
@@ -124,14 +174,21 @@ class UserControlWidget:
                     print(f"- {err}")
                 return
 
-            predictions = self.model.predict(self.total_df[self.columns])
+            feature_cols = [c for c in self.total_df.columns if c != 'Prediction']
+            predictions = self.model.predict(self.total_df[feature_cols])
             result_df = self.total_df.copy()
             result_df['Prediction'] = predictions
 
             print("예측 결과:")
             display(result_df)
 
-# Example usage (Replace with actual model)
+# Example usage (Replace with actual model and reference data)
 # xgb_model = trained_xgb_model
-data_columns = ['충진_하단', '충진_중단', '충진_상단', '장입Total']
-# widget = UserControlWidget(model=xgb_model, columns=data_columns)
+# reference_df = pd.read_csv('training_data.csv')
+# control_columns = ['충진_하단', '충진_중단', '충진_상단']
+# widget = UserControlInputWidget(
+#     model=xgb_model,
+#     user_control_columns=control_columns,
+#     reference=reference_df,
+#     highlight_columns=control_columns,
+# )
