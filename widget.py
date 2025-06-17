@@ -5,6 +5,7 @@ from IPython.display import display, clear_output
 class UserControlInputWidget:
     """Interactive widget for collecting user input and performing prediction."""
 
+
     def __init__(
         self,
         model,
@@ -22,6 +23,7 @@ class UserControlInputWidget:
         ----------
         model : Any
             Prediction model that exposes a ``predict`` method.
+
         user_control_columns : dict
             Dictionary specifying columns to control. Keys are "int" or "float"
             and values are ``{column_name: step}`` mappings describing the input
@@ -30,6 +32,7 @@ class UserControlInputWidget:
             Reference data used for calculating default values and highlight ranges.
         highlight_columns : list[str], optional
             Columns to highlight based on reference statistics.
+
         expansion_alpha : float, optional
             Factor for extending the input bounds by ``alpha * std``. Must be between
             1.0 and 3.0. Default is ``2.0``.
@@ -45,6 +48,7 @@ class UserControlInputWidget:
         self.user_control_columns = user_control_columns
         self.reference = reference
         self.highlight_columns = highlight_columns or []
+
         self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
@@ -74,6 +78,7 @@ class UserControlInputWidget:
 
     def _build_ui(self):
         widget_list = []
+
         for dtype, cols in self.user_control_columns.items():
             for col, step in cols.items():
                 series = self.reference[col] if col in self.reference else pd.Series(dtype=float)
@@ -112,7 +117,6 @@ class UserControlInputWidget:
 
                 self.widgets_dict[col] = input_widget
                 widget_list.append(widgets.HBox([label, input_widget]))
-
         buttons = widgets.HBox([self.submit_button, self.predict_button])
         form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
         display(form)
@@ -251,6 +255,7 @@ class UserControlInputWidget:
 # Example usage (Replace with actual model and reference data)
 # xgb_model = trained_xgb_model
 # reference_df = pd.read_csv('training_data.csv')
+
 # control_columns = {
 #     'int': {'충진_하단': 1},
 #     'float': {'충진_중단': 0.5, '충진_상단': 0.1},
@@ -259,5 +264,6 @@ class UserControlInputWidget:
 #     model=xgb_model,
 #     user_control_columns=control_columns,
 #     reference=reference_df,
+
 #     highlight_columns=list(control_columns.get('int', {}).keys()) + list(control_columns.get('float', {}).keys()),
 # )
