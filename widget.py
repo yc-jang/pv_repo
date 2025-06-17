@@ -5,7 +5,18 @@ from IPython.display import display, clear_output
 class UserControlInputWidget:
     """Interactive widget for collecting user input and performing prediction."""
 
-    def __init__(self, model, user_control_columns, reference: pd.DataFrame, highlight_columns=None):
+
+    def __init__(
+        self,
+        model,
+        user_control_columns,
+        reference: pd.DataFrame,
+        highlight_columns=None,
+        *,
+        expansion_alpha: float = 2.0,
+        clamp_min: float | None = None,
+        clamp_max: float | None = None,
+    ):
         """Create the widget.
 
         Parameters
@@ -21,6 +32,16 @@ class UserControlInputWidget:
             Reference data used for calculating default values and highlight ranges.
         highlight_columns : list[str], optional
             Columns to highlight based on reference statistics.
+
+        expansion_alpha : float, optional
+            Factor for extending the input bounds by ``alpha * std``. Must be between
+            1.0 and 3.0. Default is ``2.0``.
+        clamp_min : float, optional
+            Minimum bound allowed when expanding ranges. If ``None`` no lower
+            clamping is applied.
+        clamp_max : float, optional
+            Maximum bound allowed when expanding ranges. If ``None`` no upper
+            clamping is applied.
         """
 
         self.model = model
@@ -28,8 +49,11 @@ class UserControlInputWidget:
         self.reference = reference
         self.highlight_columns = highlight_columns or []
 
-        # Keep columns attribute for compatibility with prediction stage
+        self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
 
+        # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
         float_cols = list(user_control_columns.get("float", {}).keys())
         self.columns = int_cols + float_cols
@@ -61,6 +85,14 @@ class UserControlInputWidget:
                 mean_val = series.mean() if not series.empty else 0
                 min_val = series.min() if not series.empty else 0
                 max_val = series.max() if not series.empty else 0
+                std_val = series.std() if not series.empty else 0
+
+                expanded_min = min_val - self.expansion_alpha * std_val
+                expanded_max = max_val + self.expansion_alpha * std_val
+                if self.clamp_min is not None:
+                    expanded_min = max(expanded_min, self.clamp_min)
+                if self.clamp_max is not None:
+                    expanded_max = min(expanded_max, self.clamp_max)
 
                 label_style = 'color:blue; font-weight:bold;' if col in self.highlight_columns else ''
                 label = widgets.HTML(
@@ -69,14 +101,22 @@ class UserControlInputWidget:
                 )
 
                 if dtype == 'int':
-                    input_widget = widgets.IntText(value=int(round(mean_val)), step=step)
+                    input_widget = widgets.BoundedIntText(
+                        value=int(round(mean_val)),
+                        step=step,
+                        min=int(round(expanded_min)),
+                        max=int(round(expanded_max)),
+                    )
                 else:
-                    input_widget = widgets.FloatText(value=round(float(mean_val), 3), step=step)
+                    input_widget = widgets.BoundedFloatText(
+                        value=round(float(mean_val), 3),
+                        step=step,
+                        min=float(expanded_min),
+                        max=float(expanded_max),
+                    )
 
                 self.widgets_dict[col] = input_widget
                 widget_list.append(widgets.HBox([label, input_widget]))
-
-
         buttons = widgets.HBox([self.submit_button, self.predict_button])
         form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
         display(form)
@@ -226,5 +266,4 @@ class UserControlInputWidget:
 #     reference=reference_df,
 
 #     highlight_columns=list(control_columns.get('int', {}).keys()) + list(control_columns.get('float', {}).keys()),
-
 # )
