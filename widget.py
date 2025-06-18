@@ -239,11 +239,13 @@ class UserControlInputWidget:
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
+
         for col in self.dependent_columns:
             if col in df.columns and col in self.widgets_dict:
                 val = df[col].iloc[0]
                 widget = self.widgets_dict[col]
                 widget.value = val
+
                 # 종속 컬럼 값을 해당 위젯에 반영한다
 
     def _on_input_change(self, change: dict) -> None:
