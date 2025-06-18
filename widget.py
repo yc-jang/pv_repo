@@ -57,7 +57,6 @@ class UserControlInputWidget:
 
         # User input widgets generated from provided columns
         self.widgets_dict = {}
-        self.status_indicators = {}
 
         # Buttons
         self.submit_button = widgets.Button(description="Submit", button_style="success")
@@ -120,20 +119,11 @@ class UserControlInputWidget:
                         max=float(expanded_max),
                     )
 
-                status = None
                 if col in self.dependent_columns:
                     input_widget.disabled = True
-                    status = widgets.HTML(
-                        value="<span style='color:yellow'>&#9679;</span>",
-                        layout=widgets.Layout(width='20px')
-                    )
-                    self.status_indicators[col] = status
 
                 self.widgets_dict[col] = input_widget
-                children = [label, input_widget]
-                if status:
-                    children.append(status)
-                widget_list.append(widgets.HBox(children))
+                widget_list.append(widgets.HBox([label, input_widget]))
 
         buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
         form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
@@ -249,20 +239,14 @@ class UserControlInputWidget:
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
-        errors = self._validate_input(df)
+
         for col in self.dependent_columns:
             if col in df.columns and col in self.widgets_dict:
                 val = df[col].iloc[0]
                 widget = self.widgets_dict[col]
                 widget.value = val
-                color = "green"
-                for err in errors:
-                    if col in err:
-                        color = "yellow"
-                        break
-                self.status_indicators[col].value = (
-                    f"<span style='color:{color}'>&#9679;</span>"
-                )
+
+                # 종속 컬럼 값을 해당 위젯에 반영한다
 
     def _on_input_change(self, change: dict) -> None:
         """입력 값 변경 시 호출되어 종속 컬럼을 갱신한다."""
