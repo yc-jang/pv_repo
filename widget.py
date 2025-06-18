@@ -44,6 +44,10 @@ class UserControlInputWidget:
         self.user_control_columns = user_control_columns
         self.reference = reference
         self.highlight_columns = highlight_columns or []
+        self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
+        self.dependent_columns = dependent_columns or []
 
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
@@ -145,26 +149,20 @@ class UserControlInputWidget:
         self._update_dependent_columns()
 
     def _calculate_dependent_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """입력 값으로부터 계산되는 종속 컬럼을 추가한다."""
+        """현재 입력 값으로부터 종속 컬럼을 계산한다."""
 
-        # 필요한 계산을 순서대로 적용
-        calculations = [
-            lambda df: df.assign(장입Total=df[['충진_하단', '충진_중단', '충진_상단']].sum(axis=1))
-            # More calculations can be added here
-        ]
-        for calc_func in calculations:
-            df = calc_func(df)
+        # 예: 상단 + 중단 + 하단의 합을 총합 컬럼에 반영
+        if {'상단', '중단', '하단', '총합'}.issubset(df.columns):
+            df['총합'] = df[['상단', '중단', '하단']].sum(axis=1)
 
-        # 새로 계산된 컬럼까지 포함하도록 순서를 갱신
-        self.columns = list(df.columns)
         return df
 
     def _validate_input(self, df: pd.DataFrame) -> List[str]:
         """사용자 입력이 규칙을 지키는지 확인한다."""
 
         errors: List[str] = []
-        if '장입Total' in df.columns and (df['장입Total'] != 16).any():
-            errors.append("'장입Total'은 반드시 16이어야 합니다.")
+        if '총합' in df.columns and (df['총합'] != 16).any():
+            errors.append("'총합'은 반드시 16이어야 합니다.")
         return errors
 
     def _style_dataframe(self) -> None:
@@ -176,9 +174,9 @@ class UserControlInputWidget:
 
         styled_df = self.total_df.style
 
-        # Highlight 장입Total validity if present
-        if '장입Total' in self.total_df.columns:
-            styled_df = styled_df.applymap(highlight_invalid, subset=['장입Total'])
+        # Highlight 총합 validity if present
+        if '총합' in self.total_df.columns:
+            styled_df = styled_df.applymap(highlight_invalid, subset=['총합'])
 
         # Highlight user specified columns based on reference statistics
         for col in self.highlight_columns:
@@ -194,7 +192,6 @@ class UserControlInputWidget:
         with self.df_output:
             clear_output()
             display(styled_df)
-
 
     def _on_submit(self, b: widgets.Button) -> None:
         """사용자가 입력한 값을 데이터프레임에 추가한다."""
@@ -326,12 +323,11 @@ class UserControlInputWidget:
 # xgb_model = trained_xgb_model
 # reference_df = pd.read_csv('training_data.csv')
 # control_columns = {
-#     'int': {'충진_하단': 1},
-#     'float': {'충진_중단': 0.5, '충진_상단': 0.1},
+#     'int': {'하단': 1, '중단': 1, '상단': 1, '총합': 1},
 # }
 # widget = UserControlInputWidget(
 #     model=xgb_model,
 #     user_control_columns=control_columns,
 #     reference=reference_df,
-#     highlight_columns=list(control_columns.get('int', {}).keys()) + list(control_columns.get('float', {}).keys()),
+#     highlight_columns=list(control_columns.get('int', {}).keys()),
 # )
