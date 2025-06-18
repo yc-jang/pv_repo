@@ -44,10 +44,6 @@ class UserControlInputWidget:
         self.user_control_columns = user_control_columns
         self.reference = reference
         self.highlight_columns = highlight_columns or []
-        self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
-        self.clamp_min = clamp_min
-        self.clamp_max = clamp_max
-        self.dependent_columns = dependent_columns or []
 
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
@@ -158,6 +154,7 @@ class UserControlInputWidget:
         ]
         for calc_func in calculations:
             df = calc_func(df)
+
         # 새로 계산된 컬럼까지 포함하도록 순서를 갱신
         self.columns = list(df.columns)
         return df
@@ -197,6 +194,7 @@ class UserControlInputWidget:
         with self.df_output:
             clear_output()
             display(styled_df)
+
 
     def _on_submit(self, b: widgets.Button) -> None:
         """사용자가 입력한 값을 데이터프레임에 추가한다."""
