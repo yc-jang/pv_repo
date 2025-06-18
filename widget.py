@@ -15,6 +15,7 @@ class UserControlInputWidget:
         expansion_alpha: float = 2.0,
         clamp_min: float | None = None,
         clamp_max: float | None = None,
+
         dependent_columns: list[str] | None = None,
     ):
         """Create the widget.
@@ -23,6 +24,7 @@ class UserControlInputWidget:
         ----------
         model : Any
             Prediction model that exposes a ``predict`` method.
+
         user_control_columns : dict
             Dictionary specifying columns to control. Keys are "int" or "float"
             and values are ``{column_name: step}`` mappings describing the input
@@ -31,6 +33,7 @@ class UserControlInputWidget:
             Reference data used for calculating default values and highlight ranges.
         highlight_columns : list[str], optional
             Columns to highlight based on reference statistics.
+
         expansion_alpha : float, optional
             Factor for extending the input bounds by ``alpha * std``. Must be between
             1.0 and 3.0. Default is ``2.0``.
@@ -49,6 +52,7 @@ class UserControlInputWidget:
         self.user_control_columns = user_control_columns
         self.reference = reference
         self.highlight_columns = highlight_columns or []
+
         self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
@@ -68,6 +72,7 @@ class UserControlInputWidget:
         self.submit_button = widgets.Button(description="Submit", button_style="success")
         self.predict_button = widgets.Button(description="Predict", button_style="info")
         self.reset_button = widgets.Button(description="Reset", button_style="warning")
+
         self.submit_button.on_click(self._on_submit)
         self.predict_button.on_click(self._on_predict)
         self.reset_button.on_click(self._on_reset)
@@ -83,6 +88,10 @@ class UserControlInputWidget:
 
     def _build_ui(self):
         widget_list = []
+
+    def _build_ui(self):
+        widget_list = []
+
         for dtype, cols in self.user_control_columns.items():
             for col, step in cols.items():
                 series = self.reference[col] if col in self.reference else pd.Series(dtype=float)
