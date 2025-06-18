@@ -1,62 +1,49 @@
 import pandas as pd
 import ipywidgets as widgets
 from IPython.display import display, clear_output
+from typing import Any, Dict, List
 
 class UserControlInputWidget:
-    """Interactive widget for collecting user input and performing prediction."""
+    """사용자 입력을 받아 예측을 수행하는 인터랙티브 위젯."""
 
     def __init__(
         self,
-        model,
-        user_control_columns,
+        model: Any,
+        user_control_columns: Dict[str, Dict[str, float]],
         reference: pd.DataFrame,
-        highlight_columns=None,
+        highlight_columns: List[str] | None = None,
         *,
         expansion_alpha: float = 2.0,
         clamp_min: float | None = None,
         clamp_max: float | None = None,
-
-        dependent_columns: list[str] | None = None,
-    ):
-        """Create the widget.
+        dependent_columns: List[str] | None = None,
+    ) -> None:
+        """위젯을 초기화한다.
 
         Parameters
         ----------
         model : Any
-            Prediction model that exposes a ``predict`` method.
-
+            ``predict`` 메서드를 가진 예측 모델
         user_control_columns : dict
-            Dictionary specifying columns to control. Keys are "int" or "float"
-            and values are ``{column_name: step}`` mappings describing the input
-            type and adjustment step for each column.
+            ``int`` 또는 ``float`` 타입별로 컬럼과 스텝을 지정하는 딕셔너리
         reference : pandas.DataFrame
-            Reference data used for calculating default values and highlight ranges.
+            기본 값과 범위 계산에 사용하는 참조 데이터
         highlight_columns : list[str], optional
-            Columns to highlight based on reference statistics.
-
+            강조 표시할 컬럼 목록
         expansion_alpha : float, optional
-            Factor for extending the input bounds by ``alpha * std``. Must be between
-            1.0 and 3.0. Default is ``2.0``.
+            입력 허용 범위를 ``alpha * std`` 만큼 확장할 배수 (1.0~3.0)
         clamp_min : float, optional
-            Minimum bound allowed when expanding ranges. If ``None`` no lower
-            clamping is applied.
+            확장 시 적용할 최소값 제한
         clamp_max : float, optional
-            Maximum bound allowed when expanding ranges. If ``None`` no upper
-            clamping is applied.
+            확장 시 적용할 최대값 제한
         dependent_columns : list[str], optional
-            Columns whose values are derived from other inputs and should be
-            displayed as read-only widgets.
+            다른 입력에 의해 계산되는 읽기 전용 컬럼
         """
 
         self.model = model
         self.user_control_columns = user_control_columns
         self.reference = reference
         self.highlight_columns = highlight_columns or []
-
-        self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
-        self.clamp_min = clamp_min
-        self.clamp_max = clamp_max
-        self.dependent_columns = dependent_columns or []
 
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
@@ -72,7 +59,6 @@ class UserControlInputWidget:
         self.submit_button = widgets.Button(description="Submit", button_style="success")
         self.predict_button = widgets.Button(description="Predict", button_style="info")
         self.reset_button = widgets.Button(description="Reset", button_style="warning")
-
         self.submit_button.on_click(self._on_submit)
         self.predict_button.on_click(self._on_predict)
         self.reset_button.on_click(self._on_reset)
@@ -86,12 +72,10 @@ class UserControlInputWidget:
         self._build_ui()
         self._attach_observers()
 
-    def _build_ui(self):
-        widget_list = []
+    def _build_ui(self) -> None:
+        """위젯 화면을 구성한다."""
 
-    def _build_ui(self):
-        widget_list = []
-
+        widget_list = []  # 각 입력 위젯을 차례로 담을 리스트
         for dtype, cols in self.user_control_columns.items():
             for col, step in cols.items():
                 series = self.reference[col] if col in self.reference else pd.Series(dtype=float)
@@ -151,8 +135,8 @@ class UserControlInputWidget:
         form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
         display(form)
 
-    def _attach_observers(self):
-        """Attach change observers to update dependent columns in real time."""
+    def _attach_observers(self) -> None:
+        """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
         for col, widget in self.widgets_dict.items():
             if col not in self.dependent_columns:
                 widget.observe(self._on_input_change, names="value")
@@ -160,27 +144,33 @@ class UserControlInputWidget:
         # Initial update to compute dependent columns
         self._update_dependent_columns()
 
-    def _calculate_dependent_columns(self, df):
-        # Modular calculation function
+    def _calculate_dependent_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """입력 값으로부터 계산되는 종속 컬럼을 추가한다."""
+
+        # 필요한 계산을 순서대로 적용
         calculations = [
             lambda df: df.assign(장입Total=df[['충진_하단', '충진_중단', '충진_상단']].sum(axis=1))
             # More calculations can be added here
         ]
         for calc_func in calculations:
             df = calc_func(df)
-        # Ensure internal column order reflects calculated columns
+
+        # 새로 계산된 컬럼까지 포함하도록 순서를 갱신
         self.columns = list(df.columns)
         return df
 
-    def _validate_input(self, df):
-        # Separate validation function
-        errors = []
+    def _validate_input(self, df: pd.DataFrame) -> List[str]:
+        """사용자 입력이 규칙을 지키는지 확인한다."""
+
+        errors: List[str] = []
         if '장입Total' in df.columns and (df['장입Total'] != 16).any():
             errors.append("'장입Total'은 반드시 16이어야 합니다.")
         return errors
 
-    def _style_dataframe(self):
-        # DataFrame styling based on validation
+    def _style_dataframe(self) -> None:
+        """검증 결과를 반영해 데이터프레임을 꾸민다."""
+
+        # 유효성 검사를 위한 하이라이트 함수
         def highlight_invalid(val):
             return 'background-color: red' if val != 16 else ''
 
@@ -205,8 +195,11 @@ class UserControlInputWidget:
             clear_output()
             display(styled_df)
 
-    def _on_submit(self, b):
-        # Gather inputs
+
+    def _on_submit(self, b: widgets.Button) -> None:
+        """사용자가 입력한 값을 데이터프레임에 추가한다."""
+
+        # 모든 입력 값을 하나의 딕셔너리로 모은다
         input_data = {col: widget.value for col, widget in self.widgets_dict.items()}
         input_df = pd.DataFrame([input_data], columns=self.columns)
 
@@ -246,14 +239,16 @@ class UserControlInputWidget:
                 for err in errors:
                     print(f"Validation Error: {err}")
 
-    def _display_delete_buttons(self):
+    def _display_delete_buttons(self) -> None:
+        """현재 삭제 버튼들을 화면에 다시 표시한다."""
+
         buttons_box = widgets.HBox(self.delete_buttons)
         with self.delete_output:
             clear_output()
             display(buttons_box)
 
-    def _update_dependent_columns(self):
-        """Recalculate and update dependent widgets based on current inputs."""
+    def _update_dependent_columns(self) -> None:
+        """현재 입력 값으로 종속 컬럼을 다시 계산하고 위젯에 반영한다."""
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
@@ -272,18 +267,22 @@ class UserControlInputWidget:
                     f"<span style='color:{color}'>&#9679;</span>"
                 )
 
-    def _on_input_change(self, change):
+    def _on_input_change(self, change: dict) -> None:
+        """입력 값 변경 시 호출되어 종속 컬럼을 갱신한다."""
+
         self._update_dependent_columns()
 
-    def _on_reset(self, b):
-        """Clear all submitted rows and reset displayed outputs."""
+    def _on_reset(self, b: widgets.Button) -> None:
+        """모든 입력 결과를 초기 상태로 되돌린다."""
         self.total_df = pd.DataFrame(columns=self.columns)
         self.delete_buttons = []
         self._display_delete_buttons()
         self._style_dataframe()
 
-    def _delete_row(self, idx):
-        # Delete row from DataFrame
+    def _delete_row(self, idx: int) -> None:
+        """지정한 행을 삭제하고 버튼 상태를 갱신한다."""
+
+        # 범위를 벗어나면 아무 것도 하지 않음
         if idx >= len(self.total_df):
             return
 
@@ -298,7 +297,9 @@ class UserControlInputWidget:
         self._display_delete_buttons()
         self._style_dataframe()
 
-    def _on_predict(self, b):
+    def _on_predict(self, b: widgets.Button) -> None:
+        """모은 데이터를 사용하여 모델 예측을 실행한다."""
+
         with self.output:
             clear_output()
             if self.total_df.empty:
