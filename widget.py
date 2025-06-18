@@ -5,7 +5,6 @@ from IPython.display import display, clear_output
 class UserControlInputWidget:
     """Interactive widget for collecting user input and performing prediction."""
 
-
     def __init__(
         self,
         model,
@@ -16,6 +15,8 @@ class UserControlInputWidget:
         expansion_alpha: float = 2.0,
         clamp_min: float | None = None,
         clamp_max: float | None = None,
+
+        dependent_columns: list[str] | None = None,
     ):
         """Create the widget.
 
@@ -42,6 +43,9 @@ class UserControlInputWidget:
         clamp_max : float, optional
             Maximum bound allowed when expanding ranges. If ``None`` no upper
             clamping is applied.
+        dependent_columns : list[str], optional
+            Columns whose values are derived from other inputs and should be
+            displayed as read-only widgets.
         """
 
         self.model = model
@@ -52,6 +56,7 @@ class UserControlInputWidget:
         self.expansion_alpha = max(1.0, min(expansion_alpha, 3.0))
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
+        self.dependent_columns = dependent_columns or []
 
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
@@ -61,12 +66,16 @@ class UserControlInputWidget:
 
         # User input widgets generated from provided columns
         self.widgets_dict = {}
+        self.status_indicators = {}
 
         # Buttons
         self.submit_button = widgets.Button(description="Submit", button_style="success")
         self.predict_button = widgets.Button(description="Predict", button_style="info")
+        self.reset_button = widgets.Button(description="Reset", button_style="warning")
+
         self.submit_button.on_click(self._on_submit)
         self.predict_button.on_click(self._on_predict)
+        self.reset_button.on_click(self._on_reset)
 
         self.output = widgets.Output()
         self.df_output = widgets.Output()
@@ -75,6 +84,10 @@ class UserControlInputWidget:
         self.delete_buttons = []
 
         self._build_ui()
+        self._attach_observers()
+
+    def _build_ui(self):
+        widget_list = []
 
     def _build_ui(self):
         widget_list = []
@@ -96,7 +109,11 @@ class UserControlInputWidget:
 
                 label_style = 'color:blue; font-weight:bold;' if col in self.highlight_columns else ''
                 label = widgets.HTML(
-                    value=f"<span style='{label_style}'>{col}</span> ({min_val:.2f} ~ {max_val:.2f})",
+                    value=(
+                        f"<span style='{label_style}'>{col}</span> "
+                        f"(min: {min_val:.2f} ~ max: {max_val:.2f}, "
+                        f"mean: {mean_val:.2f})"
+                    ),
                     layout=widgets.Layout(width='500px')
                 )
 
@@ -115,11 +132,33 @@ class UserControlInputWidget:
                         max=float(expanded_max),
                     )
 
+                status = None
+                if col in self.dependent_columns:
+                    input_widget.disabled = True
+                    status = widgets.HTML(
+                        value="<span style='color:yellow'>&#9679;</span>",
+                        layout=widgets.Layout(width='20px')
+                    )
+                    self.status_indicators[col] = status
+
                 self.widgets_dict[col] = input_widget
-                widget_list.append(widgets.HBox([label, input_widget]))
-        buttons = widgets.HBox([self.submit_button, self.predict_button])
+                children = [label, input_widget]
+                if status:
+                    children.append(status)
+                widget_list.append(widgets.HBox(children))
+
+        buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
         form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
         display(form)
+
+    def _attach_observers(self):
+        """Attach change observers to update dependent columns in real time."""
+        for col, widget in self.widgets_dict.items():
+            if col not in self.dependent_columns:
+                widget.observe(self._on_input_change, names="value")
+
+        # Initial update to compute dependent columns
+        self._update_dependent_columns()
 
     def _calculate_dependent_columns(self, df):
         # Modular calculation function
@@ -213,6 +252,36 @@ class UserControlInputWidget:
             clear_output()
             display(buttons_box)
 
+    def _update_dependent_columns(self):
+        """Recalculate and update dependent widgets based on current inputs."""
+        input_values = {c: w.value for c, w in self.widgets_dict.items()}
+        df = pd.DataFrame([input_values], columns=self.columns)
+        df = self._calculate_dependent_columns(df)
+        errors = self._validate_input(df)
+        for col in self.dependent_columns:
+            if col in df.columns and col in self.widgets_dict:
+                val = df[col].iloc[0]
+                widget = self.widgets_dict[col]
+                widget.value = val
+                color = "green"
+                for err in errors:
+                    if col in err:
+                        color = "yellow"
+                        break
+                self.status_indicators[col].value = (
+                    f"<span style='color:{color}'>&#9679;</span>"
+                )
+
+    def _on_input_change(self, change):
+        self._update_dependent_columns()
+
+    def _on_reset(self, b):
+        """Clear all submitted rows and reset displayed outputs."""
+        self.total_df = pd.DataFrame(columns=self.columns)
+        self.delete_buttons = []
+        self._display_delete_buttons()
+        self._style_dataframe()
+
     def _delete_row(self, idx):
         # Delete row from DataFrame
         if idx >= len(self.total_df):
@@ -255,7 +324,6 @@ class UserControlInputWidget:
 # Example usage (Replace with actual model and reference data)
 # xgb_model = trained_xgb_model
 # reference_df = pd.read_csv('training_data.csv')
-
 # control_columns = {
 #     'int': {'충진_하단': 1},
 #     'float': {'충진_중단': 0.5, '충진_상단': 0.1},
@@ -264,6 +332,5 @@ class UserControlInputWidget:
 #     model=xgb_model,
 #     user_control_columns=control_columns,
 #     reference=reference_df,
-
 #     highlight_columns=list(control_columns.get('int', {}).keys()) + list(control_columns.get('float', {}).keys()),
 # )
