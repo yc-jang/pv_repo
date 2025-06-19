@@ -49,6 +49,7 @@ class UserControlInputWidget:
         self.clamp_max = clamp_max
         self.dependent_columns = dependent_columns or []
 
+
         # 검색을 위한 기본 컬럼 이름
         self.lot_column = "lot번호"
         self.date_column = "날짜"
@@ -73,6 +74,7 @@ class UserControlInputWidget:
         self.output = widgets.Output()
         self.df_output = widgets.Output()
         self.delete_output = widgets.Output()
+
         self.search_output = widgets.Output()
 
         # 검색 위젯들
@@ -92,6 +94,7 @@ class UserControlInputWidget:
 
     def _build_ui(self) -> None:
         """위젯 화면을 구성한다."""
+
 
         # 검색 박스
         self.lot_dropdown.options = self._get_lot_options()
@@ -147,10 +150,11 @@ class UserControlInputWidget:
                 widget_list.append(widgets.HBox([label, input_widget]))
 
         buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
+
         form = widgets.VBox(
             [search_box, self.search_output] + widget_list + [buttons, self.delete_output, self.output, self.df_output]
         )
-        display(form)
+``        display(form)
 
     def _attach_observers(self) -> None:
         """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
@@ -160,6 +164,7 @@ class UserControlInputWidget:
 
         # Initial update to compute dependent columns
         self._update_dependent_columns()
+
 
     def _get_lot_options(self) -> List[str]:
         """선택된 날짜 범위에 해당하는 lot 목록을 반환한다."""
@@ -303,11 +308,13 @@ class UserControlInputWidget:
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
+
         for col in self.dependent_columns:
             if col in df.columns and col in self.widgets_dict:
                 val = df[col].iloc[0]
                 widget = self.widgets_dict[col]
                 widget.value = val
+
                 # 종속 컬럼 값을 해당 위젯에 반영한다
 
     def _on_input_change(self, change: dict) -> None:
