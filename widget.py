@@ -49,6 +49,11 @@ class UserControlInputWidget:
         self.clamp_max = clamp_max
         self.dependent_columns = dependent_columns or []
 
+
+        # 검색을 위한 기본 컬럼 이름
+        self.lot_column = "lot번호"
+        self.date_column = "날짜"
+
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
         float_cols = list(user_control_columns.get("float", {}).keys())
@@ -70,6 +75,18 @@ class UserControlInputWidget:
         self.df_output = widgets.Output()
         self.delete_output = widgets.Output()
 
+        self.search_output = widgets.Output()
+
+        # 검색 위젯들
+        self.start_date_picker = widgets.DatePicker(description="시작일")
+        self.end_date_picker = widgets.DatePicker(description="종료일")
+        self.lot_dropdown = widgets.Dropdown(description="Lot")
+        self.search_button = widgets.Button(description="검색", button_style="primary")
+
+        self.start_date_picker.observe(self._on_date_change, names="value")
+        self.end_date_picker.observe(self._on_date_change, names="value")
+        self.search_button.on_click(self._on_search)
+
         self.delete_buttons = []
 
         self._build_ui()
@@ -77,6 +94,13 @@ class UserControlInputWidget:
 
     def _build_ui(self) -> None:
         """위젯 화면을 구성한다."""
+
+
+        # 검색 박스
+        self.lot_dropdown.options = self._get_lot_options()
+        search_box = widgets.HBox(
+            [self.start_date_picker, self.end_date_picker, self.lot_dropdown, self.search_button]
+        )
 
         widget_list = []  # 각 입력 위젯을 차례로 담을 리스트
         for dtype, cols in self.user_control_columns.items():
@@ -126,8 +150,11 @@ class UserControlInputWidget:
                 widget_list.append(widgets.HBox([label, input_widget]))
 
         buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
-        form = widgets.VBox(widget_list + [buttons, self.delete_output, self.output, self.df_output])
-        display(form)
+
+        form = widgets.VBox(
+            [search_box, self.search_output] + widget_list + [buttons, self.delete_output, self.output, self.df_output]
+        )
+``        display(form)
 
     def _attach_observers(self) -> None:
         """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
@@ -136,6 +163,48 @@ class UserControlInputWidget:
                 widget.observe(self._on_input_change, names="value")
 
         # Initial update to compute dependent columns
+        self._update_dependent_columns()
+
+
+    def _get_lot_options(self) -> List[str]:
+        """선택된 날짜 범위에 해당하는 lot 목록을 반환한다."""
+        df = self.reference
+        start = self.start_date_picker.value
+        end = self.end_date_picker.value
+        if start is not None:
+            df = df[df[self.date_column] >= pd.to_datetime(start)]
+        if end is not None:
+            df = df[df[self.date_column] <= pd.to_datetime(end)]
+        if self.lot_column in df.columns:
+            return sorted(df[self.lot_column].dropna().unique().tolist())
+        return []
+
+    def _on_date_change(self, change: dict) -> None:
+        """날짜 변경 시 lot 목록을 업데이트한다."""
+        self.lot_dropdown.options = self._get_lot_options()
+
+    def _on_search(self, b: widgets.Button) -> None:
+        """선택된 lot의 데이터를 불러와 입력 위젯에 채운다."""
+        lot = self.lot_dropdown.value
+        df = self.reference
+        start = self.start_date_picker.value
+        end = self.end_date_picker.value
+        if start is not None:
+            df = df[df[self.date_column] >= pd.to_datetime(start)]
+        if end is not None:
+            df = df[df[self.date_column] <= pd.to_datetime(end)]
+        if lot is not None:
+            df = df[df[self.lot_column] == lot]
+        with self.search_output:
+            clear_output()
+            if df.empty:
+                print("검색 결과가 없습니다.")
+                return
+            row = df.iloc[0]
+            for col, widget in self.widgets_dict.items():
+                if col in row.index:
+                    widget.value = row[col]
+            print(f"{lot} 데이터가 로드되었습니다.")
         self._update_dependent_columns()
 
     def _calculate_dependent_columns(self, df: pd.DataFrame) -> pd.DataFrame:
