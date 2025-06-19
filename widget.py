@@ -12,6 +12,7 @@ class UserControlInputWidget:
         user_control_columns: Dict[str, Dict[str, float]],
         reference: pd.DataFrame,
         highlight_columns: List[str] | None = None,
+
         user_dropdown_columns: List[str] | None = None,
         *,
         expansion_alpha: float = 2.0,
@@ -51,6 +52,7 @@ class UserControlInputWidget:
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
         self.dependent_columns = dependent_columns or []
+
         self.user_dropdown_columns = user_dropdown_columns or []
 
         # 검색을 위한 기본 컬럼 이름
@@ -84,11 +86,9 @@ class UserControlInputWidget:
         self.start_date_picker = widgets.DatePicker(description="시작일")
         self.end_date_picker = widgets.DatePicker(description="종료일")
         self.lot_dropdown = widgets.Dropdown(description="Lot")
-
         self.start_date_picker.observe(self._on_date_change, names="value")
         self.end_date_picker.observe(self._on_date_change, names="value")
         self.lot_dropdown.observe(self._on_lot_change, names="value")
-
         self.delete_buttons = []
 
         self._build_ui()
@@ -96,6 +96,7 @@ class UserControlInputWidget:
 
     def _build_ui(self) -> None:
         """위젯 화면을 구성한다."""
+
 
         # 검색 박스
         self.lot_dropdown.options = self._get_lot_options()
@@ -170,11 +171,13 @@ class UserControlInputWidget:
     def _attach_observers(self) -> None:
         """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
         for col, widget in self.widgets_dict.items():
+
             if col not in self.dependent_columns and col not in self.user_dropdown_columns:
                 widget.observe(self._on_input_change, names="value")
 
         # Initial update to compute dependent columns
         self._update_dependent_columns()
+
 
     def _get_lot_options(self) -> List[str]:
         """선택된 날짜 범위에 해당하는 lot 목록을 반환한다."""
@@ -319,11 +322,13 @@ class UserControlInputWidget:
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
+
         for col in self.dependent_columns:
             if col in df.columns and col in self.widgets_dict:
                 val = df[col].iloc[0]
                 widget = self.widgets_dict[col]
                 widget.value = val
+
                 # 종속 컬럼 값을 해당 위젯에 반영한다
 
     def _on_input_change(self, change: dict) -> None:
