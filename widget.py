@@ -12,6 +12,8 @@ class UserControlInputWidget:
         user_control_columns: Dict[str, Dict[str, float]],
         reference: pd.DataFrame,
         highlight_columns: List[str] | None = None,
+
+        user_dropdown_columns: List[str] | None = None,
         *,
         expansion_alpha: float = 2.0,
         clamp_min: float | None = None,
@@ -30,6 +32,8 @@ class UserControlInputWidget:
             기본 값과 범위 계산에 사용하는 참조 데이터
         highlight_columns : list[str], optional
             강조 표시할 컬럼 목록
+        user_dropdown_columns : list[str], optional
+            0/50/100 중 하나를 선택하는 드롭다운으로 사용할 컬럼 목록
         expansion_alpha : float, optional
             입력 허용 범위를 ``alpha * std`` 만큼 확장할 배수 (1.0~3.0)
         clamp_min : float, optional
@@ -49,6 +53,7 @@ class UserControlInputWidget:
         self.clamp_max = clamp_max
         self.dependent_columns = dependent_columns or []
 
+        self.user_dropdown_columns = user_dropdown_columns or []
 
         # 검색을 위한 기본 컬럼 이름
         self.lot_column = "lot번호"
@@ -57,7 +62,8 @@ class UserControlInputWidget:
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
         float_cols = list(user_control_columns.get("float", {}).keys())
-        self.columns = int_cols + float_cols
+        dropdown_cols = list(self.user_dropdown_columns)
+        self.columns = int_cols + float_cols + dropdown_cols
         self.total_df = pd.DataFrame(columns=self.columns)
 
         # User input widgets generated from provided columns
@@ -74,19 +80,15 @@ class UserControlInputWidget:
         self.output = widgets.Output()
         self.df_output = widgets.Output()
         self.delete_output = widgets.Output()
-
         self.search_output = widgets.Output()
 
         # 검색 위젯들
         self.start_date_picker = widgets.DatePicker(description="시작일")
         self.end_date_picker = widgets.DatePicker(description="종료일")
         self.lot_dropdown = widgets.Dropdown(description="Lot")
-        self.search_button = widgets.Button(description="검색", button_style="primary")
-
         self.start_date_picker.observe(self._on_date_change, names="value")
         self.end_date_picker.observe(self._on_date_change, names="value")
-        self.search_button.on_click(self._on_search)
-
+        self.lot_dropdown.observe(self._on_lot_change, names="value")
         self.delete_buttons = []
 
         self._build_ui()
@@ -99,7 +101,7 @@ class UserControlInputWidget:
         # 검색 박스
         self.lot_dropdown.options = self._get_lot_options()
         search_box = widgets.HBox(
-            [self.start_date_picker, self.end_date_picker, self.lot_dropdown, self.search_button]
+            [self.start_date_picker, self.end_date_picker, self.lot_dropdown]
         )
 
         widget_list = []  # 각 입력 위젯을 차례로 담을 리스트
@@ -149,17 +151,28 @@ class UserControlInputWidget:
                 self.widgets_dict[col] = input_widget
                 widget_list.append(widgets.HBox([label, input_widget]))
 
-        buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
+        # 0/50/100 선택용 드롭다운 위젯 추가
+        for col in self.user_dropdown_columns:
+            label_style = 'color:blue; font-weight:bold;' if col in self.highlight_columns else ''
+            label = widgets.HTML(
+                value=f"<span style='{label_style}'>{col}</span>",
+                layout=widgets.Layout(width='500px')
+            )
+            dropdown = widgets.Dropdown(options=[0, 50, 100], value=0)
+            self.widgets_dict[col] = dropdown
+            widget_list.append(widgets.HBox([label, dropdown]))
 
+        buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
         form = widgets.VBox(
             [search_box, self.search_output] + widget_list + [buttons, self.delete_output, self.output, self.df_output]
         )
-``        display(form)
+        display(form)
 
     def _attach_observers(self) -> None:
         """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
         for col, widget in self.widgets_dict.items():
-            if col not in self.dependent_columns:
+
+            if col not in self.dependent_columns and col not in self.user_dropdown_columns:
                 widget.observe(self._on_input_change, names="value")
 
         # Initial update to compute dependent columns
@@ -182,8 +195,9 @@ class UserControlInputWidget:
     def _on_date_change(self, change: dict) -> None:
         """날짜 변경 시 lot 목록을 업데이트한다."""
         self.lot_dropdown.options = self._get_lot_options()
+        self._on_lot_change({})
 
-    def _on_search(self, b: widgets.Button) -> None:
+    def _on_lot_change(self, change: dict) -> None:
         """선택된 lot의 데이터를 불러와 입력 위젯에 채운다."""
         lot = self.lot_dropdown.value
         df = self.reference
