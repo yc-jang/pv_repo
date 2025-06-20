@@ -12,7 +12,6 @@ class UserControlInputWidget:
         user_control_columns: Dict[str, Dict[str, float]],
         reference: pd.DataFrame,
         highlight_columns: List[str] | None = None,
-
         user_dropdown_columns: List[str] | None = None,
         *,
         expansion_alpha: float = 2.0,
@@ -52,7 +51,6 @@ class UserControlInputWidget:
         self.clamp_min = clamp_min
         self.clamp_max = clamp_max
         self.dependent_columns = dependent_columns or []
-
         self.user_dropdown_columns = user_dropdown_columns or []
 
         # 검색을 위한 기본 컬럼 이름
@@ -82,21 +80,26 @@ class UserControlInputWidget:
         self.delete_output = widgets.Output()
         self.search_output = widgets.Output()
 
+        # 행 삭제를 위한 드롭다운과 버튼
+        self.delete_dropdown = widgets.Dropdown(description="삭제 Index", options=[])
+        self.delete_button = widgets.Button(description="Delete", button_style="danger")
+        self.delete_button.on_click(self._on_delete)
+
         # 검색 위젯들
         self.start_date_picker = widgets.DatePicker(description="시작일")
         self.end_date_picker = widgets.DatePicker(description="종료일")
         self.lot_dropdown = widgets.Dropdown(description="Lot")
+
         self.start_date_picker.observe(self._on_date_change, names="value")
         self.end_date_picker.observe(self._on_date_change, names="value")
         self.lot_dropdown.observe(self._on_lot_change, names="value")
-        self.delete_buttons = []
+
 
         self._build_ui()
         self._attach_observers()
 
     def _build_ui(self) -> None:
         """위젯 화면을 구성한다."""
-
 
         # 검색 박스
         self.lot_dropdown.options = self._get_lot_options()
@@ -112,7 +115,6 @@ class UserControlInputWidget:
                 min_val = series.min() if not series.empty else 0
                 max_val = series.max() if not series.empty else 0
                 std_val = series.std() if not series.empty else 0
-
                 expanded_min = min_val - self.expansion_alpha * std_val
                 expanded_max = max_val + self.expansion_alpha * std_val
                 if self.clamp_min is not None:
@@ -163,8 +165,11 @@ class UserControlInputWidget:
             widget_list.append(widgets.HBox([label, dropdown]))
 
         buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
+        delete_box = widgets.HBox([self.delete_dropdown, self.delete_button])
         form = widgets.VBox(
-            [search_box, self.search_output] + widget_list + [buttons, self.delete_output, self.output, self.df_output]
+            [search_box, self.search_output]
+            + widget_list
+            + [buttons, delete_box, self.delete_output, self.output, self.df_output]
         )
         display(form)
 
@@ -282,25 +287,8 @@ class UserControlInputWidget:
         # Add to total DataFrame
         self.total_df = pd.concat([self.total_df, input_df], ignore_index=True)
 
-        # Add delete button for the new row
-        new_idx = len(self.total_df) - 1
-        delete_button = widgets.Button(
-            description=f"Delete Row {new_idx}",
-            button_style="danger",
-            layout=widgets.Layout(width="120px"),
-        )
-
-        # Store the index on the button so the callback always has the current
-        # value even after other rows are deleted.
-        delete_button.idx = new_idx
-
-        def handle_click(btn):
-            self._delete_row(btn.idx)
-
-        delete_button.on_click(handle_click)
-        self.delete_buttons.append(delete_button)
-
-        self._display_delete_buttons()
+        # 새 행이 추가되었으므로 삭제 드롭다운 옵션을 갱신한다
+        self._update_delete_box()
         self._style_dataframe()
 
         with self.output:
@@ -309,13 +297,9 @@ class UserControlInputWidget:
                 for err in errors:
                     print(f"Validation Error: {err}")
 
-    def _display_delete_buttons(self) -> None:
-        """현재 삭제 버튼들을 화면에 다시 표시한다."""
-
-        buttons_box = widgets.HBox(self.delete_buttons)
-        with self.delete_output:
-            clear_output()
-            display(buttons_box)
+    def _update_delete_box(self) -> None:
+        """삭제 드롭다운 옵션을 최신 상태로 유지한다."""
+        self.delete_dropdown.options = list(range(len(self.total_df)))
 
     def _update_dependent_columns(self) -> None:
         """현재 입력 값으로 종속 컬럼을 다시 계산하고 위젯에 반영한다."""
@@ -328,7 +312,6 @@ class UserControlInputWidget:
                 val = df[col].iloc[0]
                 widget = self.widgets_dict[col]
                 widget.value = val
-
                 # 종속 컬럼 값을 해당 위젯에 반영한다
 
     def _on_input_change(self, change: dict) -> None:
@@ -339,8 +322,7 @@ class UserControlInputWidget:
     def _on_reset(self, b: widgets.Button) -> None:
         """모든 입력 결과를 초기 상태로 되돌린다."""
         self.total_df = pd.DataFrame(columns=self.columns)
-        self.delete_buttons = []
-        self._display_delete_buttons()
+        self._update_delete_box()
         self._style_dataframe()
 
     def _delete_row(self, idx: int) -> None:
@@ -351,15 +333,15 @@ class UserControlInputWidget:
             return
 
         self.total_df = self.total_df.drop(index=idx).reset_index(drop=True)
-        del self.delete_buttons[idx]
-
-        # Reset button labels and stored indices without reattaching handlers
-        for i, btn in enumerate(self.delete_buttons):
-            btn.description = f"Delete Row {i}"
-            btn.idx = i
-
-        self._display_delete_buttons()
+        self._update_delete_box()
         self._style_dataframe()
+
+
+    def _on_delete(self, b: widgets.Button) -> None:
+        """드롭다운에서 선택된 행을 삭제한다."""
+        if self.delete_dropdown.value is None:
+            return
+        self._delete_row(int(self.delete_dropdown.value))
 
     def _on_predict(self, b: widgets.Button) -> None:
         """모은 데이터를 사용하여 모델 예측을 실행한다."""
