@@ -115,7 +115,6 @@ class UserControlInputWidget:
                 min_val = series.min() if not series.empty else 0
                 max_val = series.max() if not series.empty else 0
                 std_val = series.std() if not series.empty else 0
-
                 expanded_min = min_val - self.expansion_alpha * std_val
                 expanded_max = max_val + self.expansion_alpha * std_val
                 if self.clamp_min is not None:
@@ -177,11 +176,13 @@ class UserControlInputWidget:
     def _attach_observers(self) -> None:
         """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
         for col, widget in self.widgets_dict.items():
+
             if col not in self.dependent_columns and col not in self.user_dropdown_columns:
                 widget.observe(self._on_input_change, names="value")
 
         # Initial update to compute dependent columns
         self._update_dependent_columns()
+
 
     def _get_lot_options(self) -> List[str]:
         """선택된 날짜 범위에 해당하는 lot 목록을 반환한다."""
@@ -305,6 +306,7 @@ class UserControlInputWidget:
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
+
         for col in self.dependent_columns:
             if col in df.columns and col in self.widgets_dict:
                 val = df[col].iloc[0]
@@ -333,6 +335,7 @@ class UserControlInputWidget:
         self.total_df = self.total_df.drop(index=idx).reset_index(drop=True)
         self._update_delete_box()
         self._style_dataframe()
+
 
     def _on_delete(self, b: widgets.Button) -> None:
         """드롭다운에서 선택된 행을 삭제한다."""
