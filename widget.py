@@ -3,11 +3,12 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 from typing import Any, Dict, List
 
+
 try:
     import shap
 except ImportError:  # pragma: no cover - optional dependency
     shap = None
-
+    
 class UserControlInputWidget:
     """사용자 입력을 받아 예측을 수행하는 인터랙티브 위젯."""
 
@@ -61,7 +62,7 @@ class UserControlInputWidget:
         # 검색을 위한 기본 컬럼 이름
         self.lot_column = "lot번호"
         self.date_column = "날짜"
-
+        
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
         float_cols = list(user_control_columns.get("float", {}).keys())
@@ -85,6 +86,7 @@ class UserControlInputWidget:
         self.delete_output = widgets.Output()
         self.search_output = widgets.Output()
 
+
         # SHAP 시각화를 위한 위젯과 상태값
         self.index_choice_dropdown = widgets.Dropdown(description="SHAP Index", options=[])
         self.shap_plot_button = widgets.Button(description="SHAP Plot")
@@ -92,7 +94,6 @@ class UserControlInputWidget:
         self.shap_output = widgets.Output()
         self.model_input: pd.DataFrame | None = None
         self.shap_values: Any | None = None
-
         # 행 삭제를 위한 드롭다운과 버튼
         self.delete_dropdown = widgets.Dropdown(description="삭제 Index", options=[])
         self.delete_button = widgets.Button(description="Delete", button_style="danger")
@@ -215,6 +216,7 @@ class UserControlInputWidget:
         self.lot_dropdown.options = self._get_lot_options()
         self._on_lot_change({})
 
+
     def _on_lot_change(self, change: dict) -> None:
         """선택된 lot의 데이터를 불러와 입력 위젯에 채운다."""
         lot = self.lot_dropdown.value
@@ -323,6 +325,7 @@ class UserControlInputWidget:
         input_values = {c: w.value for c, w in self.widgets_dict.items()}
         df = pd.DataFrame([input_values], columns=self.columns)
         df = self._calculate_dependent_columns(df)
+
         for col in self.dependent_columns:
             if col in df.columns and col in self.widgets_dict:
                 val = df[col].iloc[0]
@@ -367,6 +370,7 @@ class UserControlInputWidget:
     def _on_predict(self, b: widgets.Button) -> None:
         """모은 데이터를 사용하여 모델 예측을 실행한다."""
 
+
         with self.output:
             clear_output()
             if self.total_df.empty:
@@ -382,6 +386,7 @@ class UserControlInputWidget:
                 return
 
             feature_cols = [c for c in self.total_df.columns if c != 'Prediction']
+
             self.model_input = self.total_df[feature_cols].copy()
             predictions = self.model.predict(self.model_input)
             result_df = self.total_df.copy()
