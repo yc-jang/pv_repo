@@ -3,6 +3,12 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 from typing import Any, Dict, List
 
+
+try:
+    import shap
+except ImportError:  # pragma: no cover - optional dependency
+    shap = None
+    
 class UserControlInputWidget:
     """사용자 입력을 받아 예측을 수행하는 인터랙티브 위젯."""
 
@@ -56,7 +62,7 @@ class UserControlInputWidget:
         # 검색을 위한 기본 컬럼 이름
         self.lot_column = "lot번호"
         self.date_column = "날짜"
-
+        
         # Keep columns attribute for compatibility with prediction stage
         int_cols = list(user_control_columns.get("int", {}).keys())
         float_cols = list(user_control_columns.get("float", {}).keys())
@@ -80,6 +86,14 @@ class UserControlInputWidget:
         self.delete_output = widgets.Output()
         self.search_output = widgets.Output()
 
+
+        # SHAP 시각화를 위한 위젯과 상태값
+        self.index_choice_dropdown = widgets.Dropdown(description="SHAP Index", options=[])
+        self.shap_plot_button = widgets.Button(description="SHAP Plot")
+        self.shap_plot_button.on_click(self._on_shap_plot)
+        self.shap_output = widgets.Output()
+        self.model_input: pd.DataFrame | None = None
+        self.shap_values: Any | None = None
         # 행 삭제를 위한 드롭다운과 버튼
         self.delete_dropdown = widgets.Dropdown(description="삭제 Index", options=[])
         self.delete_button = widgets.Button(description="Delete", button_style="danger")
@@ -115,6 +129,7 @@ class UserControlInputWidget:
                 min_val = series.min() if not series.empty else 0
                 max_val = series.max() if not series.empty else 0
                 std_val = series.std() if not series.empty else 0
+
                 expanded_min = min_val - self.expansion_alpha * std_val
                 expanded_max = max_val + self.expansion_alpha * std_val
                 if self.clamp_min is not None:
@@ -166,23 +181,22 @@ class UserControlInputWidget:
 
         buttons = widgets.HBox([self.submit_button, self.predict_button, self.reset_button])
         delete_box = widgets.HBox([self.delete_dropdown, self.delete_button])
+        shap_box = widgets.HBox([self.index_choice_dropdown, self.shap_plot_button])
         form = widgets.VBox(
             [search_box, self.search_output]
             + widget_list
-            + [buttons, delete_box, self.delete_output, self.output, self.df_output]
+            + [buttons, delete_box, shap_box, self.delete_output, self.output, self.shap_output, self.df_output]
         )
         display(form)
 
     def _attach_observers(self) -> None:
         """입력 값이 변할 때 종속 컬럼을 갱신하도록 이벤트를 연결한다."""
         for col, widget in self.widgets_dict.items():
-
             if col not in self.dependent_columns and col not in self.user_dropdown_columns:
                 widget.observe(self._on_input_change, names="value")
 
         # Initial update to compute dependent columns
         self._update_dependent_columns()
-
 
     def _get_lot_options(self) -> List[str]:
         """선택된 날짜 범위에 해당하는 lot 목록을 반환한다."""
@@ -201,6 +215,7 @@ class UserControlInputWidget:
         """날짜 변경 시 lot 목록을 업데이트한다."""
         self.lot_dropdown.options = self._get_lot_options()
         self._on_lot_change({})
+
 
     def _on_lot_change(self, change: dict) -> None:
         """선택된 lot의 데이터를 불러와 입력 위젯에 채운다."""
@@ -290,6 +305,10 @@ class UserControlInputWidget:
         # 새 행이 추가되었으므로 삭제 드롭다운 옵션을 갱신한다
         self._update_delete_box()
         self._style_dataframe()
+        # 모델 입력 및 SHAP 값은 새 예측 전까지 무효화한다
+        self.model_input = None
+        self.shap_values = None
+        self.index_choice_dropdown.options = []
 
         with self.output:
             clear_output()
@@ -324,6 +343,9 @@ class UserControlInputWidget:
         self.total_df = pd.DataFrame(columns=self.columns)
         self._update_delete_box()
         self._style_dataframe()
+        self.model_input = None
+        self.shap_values = None
+        self.index_choice_dropdown.options = []
 
     def _delete_row(self, idx: int) -> None:
         """지정한 행을 삭제하고 버튼 상태를 갱신한다."""
@@ -335,7 +357,9 @@ class UserControlInputWidget:
         self.total_df = self.total_df.drop(index=idx).reset_index(drop=True)
         self._update_delete_box()
         self._style_dataframe()
-
+        self.model_input = None
+        self.shap_values = None
+        self.index_choice_dropdown.options = []
 
     def _on_delete(self, b: widgets.Button) -> None:
         """드롭다운에서 선택된 행을 삭제한다."""
@@ -345,6 +369,7 @@ class UserControlInputWidget:
 
     def _on_predict(self, b: widgets.Button) -> None:
         """모은 데이터를 사용하여 모델 예측을 실행한다."""
+
 
         with self.output:
             clear_output()
@@ -361,12 +386,38 @@ class UserControlInputWidget:
                 return
 
             feature_cols = [c for c in self.total_df.columns if c != 'Prediction']
-            predictions = self.model.predict(self.total_df[feature_cols])
+
+            self.model_input = self.total_df[feature_cols].copy()
+            predictions = self.model.predict(self.model_input)
             result_df = self.total_df.copy()
             result_df['Prediction'] = predictions
 
             print("예측 결과:")
             display(result_df)
+
+            # SHAP 값을 계산하고 인덱스 선택 옵션을 제공
+            if shap is not None:
+                self.shap_values = shap.Explainer(self.model)(self.model_input)
+                self.index_choice_dropdown.options = list(range(len(self.model_input)))
+
+    def _on_shap_plot(self, b: widgets.Button) -> None:
+        """선택된 행의 SHAP 워터폴 그래프를 표시한다."""
+        with self.shap_output:
+            clear_output()
+            if shap is None:
+                print("shap 라이브러리가 설치되어 있지 않습니다.")
+                return
+            if self.shap_values is None or self.index_choice_dropdown.value is None:
+                print("예측을 먼저 수행해 주세요.")
+                return
+
+            idx = int(self.index_choice_dropdown.value)
+            shap.plots.waterfall(self.shap_values[idx])
+
+            # 입력 값과 참조 평균을 함께 표시해 비교 가이드를 제공
+            row = self.model_input.iloc[[idx]]
+            means = self.reference[row.columns].mean().to_frame().T
+            display(pd.concat([row, means], keys=["선택값", "평균"], axis=0))
 
 # Example usage (Replace with actual model and reference data)
 # xgb_model = trained_xgb_model
