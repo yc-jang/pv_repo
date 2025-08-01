@@ -256,6 +256,54 @@ def normalize_excel_like_table(
         filled_mask=filled_mask  # True인 곳은 병합복원/보정으로 채워진 셀
     )
     return data, meta
+def flatten_multiindex_columns(
+    df: pd.DataFrame,
+    sep: str = "_",
+    dedup: bool = True,
+    strip: bool = True
+) -> pd.DataFrame:
+    """
+    df.columns가 MultiIndex이든, 단일 Index이든 모두 평탄화해서 단일 Index로 만듭니다.
+    각 레벨의 NaN/빈칸을 제거하고 sep로 join합니다.
+    """
+    new_cols = []
+    if isinstance(df.columns, pd.MultiIndex):
+        for tup in df.columns:
+            parts = []
+            for x in tup:
+                if pd.isna(x):
+                    continue
+                s = str(x)
+                if strip:
+                    s = s.strip()
+                if s != "":
+                    parts.append(s)
+            name = sep.join(parts) if parts else "col"
+            new_cols.append(name)
+    else:
+        # 단일 레벨인 경우에도 깔끔하게 정리
+        for x in df.columns:
+            s = str(x)
+            if strip:
+                s = s.strip()
+            new_cols.append(s if s != "" else "col")
+
+    # (선택) 중복 처리
+    if dedup:
+        seen = {}
+        out = []
+        for nm in new_cols:
+            if nm not in seen:
+                seen[nm] = 0
+                out.append(nm)
+            else:
+                seen[nm] += 1
+                out.append(f"{nm}.{seen[nm]}")
+        new_cols = out
+
+    out_df = df.copy()
+    out_df.columns = pd.Index(new_cols)
+    return out_df
 
 # ============== (선택) 좌측 스텁으로 행 MultiIndex 구성 ==============
 
