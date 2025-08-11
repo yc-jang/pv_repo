@@ -1,0 +1,206 @@
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+import catboost as cb
+from bayes_opt import BayesianOptimization
+import shap
+from sklearn.metrics import r2_score
+from sklearn.model_selection import train_test_split
+
+class TargetOptimizer:
+    def __init__(self, model, model_type, feature_names, X_train, scaler, desired_value, important_feature):
+        self.model = model
+        self.model_type = model_type
+        self.feature_names = feature_names
+        self.X_train = X_train[self.feature_names].copy()
+        self.scaler = scaler
+        self.desired_value = desired_value
+        self.important_features = important_feature  # important_feature로 이름 변경
+        self.feature_bounds = None
+        
+        # 검증: important_features가 feature_names의 부분집합인지 확인
+        if self.important_features:
+            assert all(f in self.feature_names for f in self.important_features), "important_features must be subset of feature_names"
+        assert self.X_train.shape[1] == len(self.feature_names), "X_train columns must match feature_names"
+        print("X_train shape:", self.X_train.shape)  # 디버깅: X_train 크기 출력
+
+    def set_feature_bounds(self, X):
+        """피처 값 범위 설정 (원본 데이터 기준)."""
+        self.feature_bounds = {
+            f: (X[f].min(), X[f].max()) for f in self.feature_names
+        }
+        if self.important_features:
+            self.feature_bounds = {f: self.feature_bounds[f] for f in self.important_features}
+        print("Feature bounds:", self.feature_bounds)  # 디버깅: 범위 출력
+
+    def objective_function(self, X, **params):
+        X = X[self.feature_names]  # 순서 고정
+        X_origin = X.copy()  # 원래 모델 입력 복사
+        
+        for f in self.important_features:
+            X[f] = params[f]  # important_features만 업데이트
+        
+        if self.scaler:
+            X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)  # 스케일링 적용
+            X_origin = pd.DataFrame(self.scaler.transform(X_origin), columns=self.feature_names)  # X_origin에도 스케일링
+        
+        if self.model_type == 'xgboost':
+            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
+            dmatrix_origin = xgb.DMatrix(X_origin, feature_names=self.feature_names)
+            y_pred = self.model.predict(dmatrix)[0]
+            origin_pred = self.model.predict(dmatrix_origin)[0]
+        
+        elif self.model_type == 'catboost':
+            y_pred = self.model.predict(X)[0]
+            origin_pred = self.model.predict(X_origin)[0]
+        
+        else:
+            raise ValueError("model_type must be 'xgboost' or 'catboost'")
+        
+        return -(y_pred - self.desired_value) ** 2  # 예측값과 desired_value의 오차 최소화
+
+    def optimize(self, for_optimal: pd.DataFrame, init_point=5, n_iter=20):
+        self.set_feature_bounds(self.X_train)  # 피처 범위 설정
+        
+        optimal_input = for_optimal[self.feature_names].copy()  # 최적화 대상 입력 복사
+        
+        def obj_func(**params):
+            return self.objective_function(optimal_input, **params)  # objective_function 호출
+        
+        bo = BayesianOptimization(
+            f=obj_func,
+            pbounds={f: self.feature_bounds[f] for f in self.important_features},
+            random_state=42,
+            verbose=2
+        )
+        bo.maximize(init_points=init_point, n_iter=n_iter)  # 베이지안 최적화 실행
+        
+        optimal_params = bo.max['params']  # 최적 파라미터 추출
+        print("Optimal params:", optimal_params)  # 디버깅: 최적 파라미터 출력
+        
+        # 최적 입력 생성
+        optimal_input = optimal_input.copy()
+        for f in self.important_features:
+            optimal_input[f] = optimal_params[f]
+        optimal_input = optimal_input[self.feature_names]
+        
+        # 최적값 계산
+        optimal_value = bo.max['target']
+        
+        print("Optimal input:", optimal_input)  # 디버깅: 최적 입력 출력
+        
+        return optimal_input, optimal_value
+
+    def predict(self, X):
+        X = X[self.feature_names]
+        if self.scaler:
+            X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)
+        if self.model_type == 'xgboost':
+            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
+            return self.model.predict(dmatrix)[0]
+        elif self.model_type == 'catboost':
+            return self.model.predict(X)[0]
+        else:
+            raise ValueError("model_type must be 'xgboost' or 'catboost'")
+
+class GeneticOptimizer:
+    def __init__(self, model, model_type, feature_names, X_train, scaler, desired_value, important_feature):
+        self.model = model
+        self.model_type = model_type
+        self.feature_names = feature_names
+        self.X_train = X_train[self.feature_names].copy()
+        self.scaler = scaler
+        self.desired_value = desired_value
+        self.important_features = important_feature  # important_feature로 이름 변경
+        self.feature_bounds = None
+        
+        # 검증: important_features가 feature_names의 부분집합인지 확인
+        if self.important_features:
+            assert all(f in self.feature_names for f in self.important_features), "important_features must be subset of feature_names"
+        assert self.X_train.shape[1] == len(self.feature_names), "X_train columns must match feature_names"
+        print("X_train shape:", self.X_train.shape)  # 디버깅: X_train 크기 출력
+
+    def set_feature_bounds(self, X):
+        """피처 값 범위 설정 (원본 데이터 기준)."""
+        self.feature_bounds = {
+            f: (X[f].min(), X[f].max()) for f in self.feature_names
+        }
+        if self.important_features:
+            self.feature_bounds = {f: self.feature_bounds[f] for f in self.important_features}
+        print("Feature bounds:", self.feature_bounds)  # 디버깅: 범위 출력
+
+    def fitness_function(self, ga_instance, solution, solution_idx):
+        """GA fitness 함수: important_features만 조정, 나머지는 X_base 유지."""
+        X = self.X_base.copy()  # X_base 복사
+        for i, f in enumerate(self.important_features):
+            X[f] = solution[i]  # solution으로 important_features 업데이트
+        X = X[self.feature_names]  # 열 순서 고정
+        
+        if self.scaler:
+            X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)  # 스케일링 적용
+        
+        if self.model_type == 'xgboost':
+            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
+            y_pred = self.model.predict(dmatrix)[0]
+        elif self.model_type == 'catboost':
+            y_pred = self.model.predict(X)[0]
+        else:
+            raise ValueError("model_type must be 'xgboost' or 'catboost'")
+        
+        # desired_value 제약
+        if not (self.desired_value - 10 <= y_pred <= self.desired_value + 10):
+            return -1e10  # 범위 벗어나면 큰 패널티
+        
+        return -(y_pred - self.desired_value) ** 2  # 오차 최소화
+
+    def optimize(self, for_optimal: pd.DataFrame, init_point=5, n_iter=20):
+        self.set_feature_bounds(self.X_train)  # 피처 범위 설정
+        
+        optimal_input = for_optimal[self.feature_names].copy()  # 최적화 대상 입력 복사
+        
+        self.X_base = optimal_input  # X_base 설정 (for_optimal 사용)
+        
+        # PyGAD 설정
+        ga_instance = pygad.GA(
+            num_generations=n_iter,  # 세대 수 (n_iter 사용)
+            num_parents_mating=init_point,  # 부모 수 (init_point 사용)
+            fitness_func=self.fitness_function,  # fitness 함수
+            sol_per_pop=50,  # 인구 크기 (기본 50)
+            num_genes=len(self.important_features),  # 유전자 수 (important_features 크기)
+            init_range_low=[self.feature_bounds[f][0] for f in self.important_features],
+            init_range_high=[self.feature_bounds[f][1] for f in self.important_features],
+            mutation_probability=0.05,  # 돌연변이 확률
+            crossover_probability=0.8,  # 교차 확률
+            random_seed=42  # 재현성
+        )
+        
+        ga_instance.run()  # GA 실행
+        
+        # 최적 솔루션 추출
+        optimal_solution, optimal_fitness, optimal_solution_idx = ga_instance.best_solution()
+        print("Optimal solution:", optimal_solution)  # 디버깅: 최적 솔루션 출력
+        
+        # 최적 입력 생성
+        optimal_input = self.X_base.copy()
+        for i, f in enumerate(self.important_features):
+            optimal_input[f] = optimal_solution[i]
+        optimal_input = optimal_input[self.feature_names]
+        
+        # 최적값 계산
+        optimal_value = optimal_fitness
+        
+        print("Optimal input:", optimal_input)  # 디버깅: 최적 입력 출력
+        
+        return optimal_input, optimal_value
+
+    def predict(self, X):
+        X = X[self.feature_names]
+        if self.scaler:
+            X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)
+        if self.model_type == 'xgboost':
+            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
+            return self.model.predict(dmatrix)[0]
+        elif self.model_type == 'catboost':
+            return self.model.predict(X)[0]
+        else:
+            raise ValueError("model_type must be 'xgboost' or 'catboost'")
