@@ -3,6 +3,80 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+import pandas as pd
+import numpy as np
+
+def analyze_before_after(csv_path: str):
+    """
+    CSV에서 PRDT_Target, Before_optim, After_Optim 컬럼을 읽어 통계 분석.
+    
+    포함 항목:
+    1) after > before 인 개수
+    2) after > before 인 비율 (%)
+    3) after - before 변화량 평균
+    4) 감소되는 값을 before로 그대로 유지했을 때의 평균 예측값
+
+    추가 포함:
+    - Before 평균 / After 평균
+    - 최대 변화량, 최소 변화량
+    - 증가 케이스 평균 변화량 / 감소 케이스 평균 변화량
+    """
+
+    # CSV 읽기
+    df = pd.read_csv(csv_path)
+    df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed")]
+    df = df.rename(columns={c: c.strip() for c in df.columns})
+
+    required = ["PRDT_Target", "Before_optim", "After_Optim"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"필수 컬럼 없음: {missing} / 존재: {list(df.columns)}")
+
+    for c in required:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=required).reset_index(drop=True)
+
+    before = df["Before_optim"].to_numpy()
+    after = df["After_Optim"].to_numpy()
+
+    diff = after - before
+    increased_mask = diff > 0
+    decreased_mask = diff < 0
+
+    # 필수 통계
+    count_increased = int(np.sum(increased_mask))
+    ratio_increased = count_increased / len(diff) * 100
+    mean_change = float(np.mean(diff))
+
+    # 감소 케이스는 before 값으로 대체했을 때의 평균
+    adjusted_after = after.copy()
+    adjusted_after[decreased_mask] = before[decreased_mask]
+    adjusted_after_mean = float(np.mean(adjusted_after))
+
+    # 추가 통계
+    mean_before = float(np.mean(before))
+    mean_after = float(np.mean(after))
+    max_change = float(np.max(diff))
+    min_change = float(np.min(diff))
+    mean_increase_only = float(np.mean(diff[increased_mask])) if count_increased > 0 else 0
+    mean_decrease_only = float(np.mean(diff[decreased_mask])) if np.sum(decreased_mask) > 0 else 0
+
+    stats = {
+        "총 데이터 수": len(diff),
+        "증가 개수": count_increased,
+        "증가 비율(%)": ratio_increased,
+        "변화량 평균": mean_change,
+        "감소값 before 유지 시 평균 After": adjusted_after_mean,
+        "Before 평균": mean_before,
+        "After 평균": mean_after,
+        "최대 변화량": max_change,
+        "최소 변화량": min_change,
+        "증가 케이스 평균 변화량": mean_increase_only,
+        "감소 케이스 평균 변화량": mean_decrease_only
+    }
+
+    return pd.DataFrame([stats])
+
 def plot_e2e_from_csv(
     csv_path: str,
     index_col: str | None = None,
