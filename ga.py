@@ -6,7 +6,7 @@ import catboost as cb
 from typing import Dict, Any, Tuple, Union, List
 
 class GeneticOptimizer:
-    def __init__(self, model, model_type: str, feature_names: list, X_train: pd.DataFrame, scaler: Any, desired_value: Union[float, List[float]], important_feature: list):
+    def __init__(self, model, model_type: str, feature_names: list, X_train: pd.DataFrame, scaler: Any, desired_value: Union[float, List[float]], important_feature: list, optimize_mode: str = 'single'):
         self.model = model
         self.model_type = model_type
         self.feature_names = feature_names
@@ -15,14 +15,16 @@ class GeneticOptimizer:
         self.desired_value = desired_value
         self.important_features = important_feature
         self.feature_bounds = None
+        self.optimize_mode = optimize_mode
         
         if self.important_features:
             assert all(f in self.feature_names for f in self.important_features), "important_features must be subset of feature_names"
         assert self.X_train.shape[1] == len(self.feature_names), "X_train columns must match feature_names"
+        assert self.optimize_mode in ['single', 'all'], "optimize_mode must be 'single' or 'all'"
         print("X_train shape:", self.X_train.shape)
+        print("Optimize mode:", self.optimize_mode)
 
     def set_feature_bounds(self, X: pd.DataFrame) -> None:
-        """피처 값 범위 설정 (원본 데이터 기준)."""
         self.feature_bounds = {
             f: (X[f].min(), X[f].max()) for f in self.feature_names
         }
@@ -31,7 +33,6 @@ class GeneticOptimizer:
         print("Feature bounds:", self.feature_bounds)
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """다중 행 예측 지원."""
         X = X[self.feature_names]
         if self.scaler:
             X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)
@@ -44,92 +45,68 @@ class GeneticOptimizer:
             raise ValueError("model_type must be 'xgboost' or 'catboost'")
 
     def fitness_function(self, X: pd.DataFrame, **params: float) -> float:
-        """GA fitness 함수: important_features만 조정, 나머지는 X 유지.
-        
-        Args:
-            X (pd.DataFrame): 입력 데이터 (for_optimal).
-            **params (float): important_features에 해당하는 피처 값들.
-
-        Returns:
-            float: -base_score - penalty, 제약 위반 시 -1e10.
-        """
-        X = X[self.feature_names].copy()  # 순서 고정
-        X_origin = X.copy()  # 원래 모델 입력 복사
+        X = X[self.feature_names].copy()
+        X_origin = X.copy()
         
         for f in self.important_features:
-            X[f] = params[f]  # important_features만 업데이트
+            X[f] = params[f]
         
         if self.scaler:
-            X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)  # 스케일링 적용
-            X_origin = pd.DataFrame(self.scaler.transform(X_origin), columns=self.feature_names)  # X_origin에도 스케일링
+            X = pd.DataFrame(self.scaler.transform(X), columns=self.feature_names)
+            X_origin = pd.DataFrame(self.scaler.transform(X_origin), columns=self.feature_names)
         
-        if self.model_type == 'xgboost':
-            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
-            dmatrix_origin = xgb.DMatrix(X_origin, feature_names=self.feature_names)
-            y_pred = self.model.predict(dmatrix)[0]
-            origin_pred = self.model.predict(dmatrix_origin)[0]
-        elif self.model_type == 'catboost':
-            y_pred = self.model.predict(X)[0]
-            origin_pred = self.model.predict(X_origin)[0]
-        else:
-            raise ValueError("model_type must be 'xgboost' or 'catboost'")
+        y_pred = self.predict(X)
+        origin_pred = self.predict(X_origin)
+        
+        # desired_value 처리
+        desired = np.array([self.desired_value] * len(X) if isinstance(self.desired_value, (int, float)) else self.desired_value)
+        assert len(desired) == len(X), "desired_value list must match X rows"
         
         # desired_value 제약
-        if not (self.desired_value - 10 <= y_pred <= self.desired_value + 10):
-            return -1e10  # 범위 벗어나면 큰 패널티
+        if not all(desired - 10 <= y_pred) or not all(y_pred <= desired + 10):
+            return -1e10
         
-        base_score = (y_pred - self.desired_value) ** 2
+        base_score = np.mean((y_pred - desired) ** 2)
         penalty_weight = 1000
-        penalty = penalty_weight * max(0, origin_pred - y_pred)
-        return -base_score - penalty  # -base_score - penalty 반환
+        penalty = penalty_weight * np.mean(np.maximum(0, origin_pred - y_pred))
+        return -base_score - penalty
 
     def optimize(self, for_optimal: pd.DataFrame, init_point: int = 5, n_iter: int = 20) -> Tuple[pd.DataFrame, float]:
-        """유전 알고리즘으로 최적화 실행 (단일 인덱스 지원).
+        self.set_feature_bounds(self.X_train)
         
-        Args:
-            for_optimal (pd.DataFrame): 최적화 대상 입력 데이터 (단일 행).
-            init_point (int): 부모 수 (num_parents_mating).
-            n_iter (int): 세대 수 (num_generations).
-
-        Returns:
-            Tuple[pd.DataFrame, float]: 최적 입력과 최적 fitness 값.
-        """
-        self.set_feature_bounds(self.X_train)  # 피처 범위 설정
-        
-        optimal_input = for_optimal[self.feature_names].copy()  # 최적화 대상 입력 복사
-        assert optimal_input.shape[0] == 1, "for_optimal must contain exactly one row"  # 단일 행 확인
+        for_optimal = for_optimal[self.feature_names].copy()
+        if self.optimize_mode == 'single':
+            assert for_optimal.shape[0] == 1, "Single mode requires exactly one row"
+        # 'all' 모드는 다중 행 허용, 별도 assert 없음
         
         def obj_func(ga_instance: pygad.GA, solution: np.ndarray, solution_idx: int) -> float:
             params = {f: solution[i] for i, f in enumerate(self.important_features)}
-            return self.fitness_function(optimal_input, **params)
+            return self.fitness_function(for_optimal, **params)
         
-        # PyGAD 설정
         ga_instance = pygad.GA(
-            num_generations=n_iter,  # 세대 수
-            num_parents_mating=init_point,  # 부모 수
-            fitness_func=obj_func,  # fitness 함수
-            sol_per_pop=50,  # 인구 크기
-            num_genes=len(self.important_features),  # 유전자 수
+            num_generations=n_iter,
+            num_parents_mating=init_point,
+            fitness_func=obj_func,
+            sol_per_pop=50,
+            num_genes=len(self.important_features),
             init_range_low=[self.feature_bounds[f][0] for f in self.important_features],
             init_range_high=[self.feature_bounds[f][1] for f in self.important_features],
-            mutation_probability=0.05,  # 돌연변이 확률
-            crossover_probability=0.8,  # 교차 확률
-            random_seed=42  # 재현성
+            mutation_probability=0.05,
+            crossover_probability=0.8,
+            random_seed=42
         )
         
-        ga_instance.run()  # GA 실행
+        ga_instance.run()
         
-        # 최적 솔루션 추출
         optimal_solution, optimal_fitness, optimal_solution_idx = ga_instance.best_solution()
-        print("Optimal solution:", optimal_solution)  # 디버깅: 최적 솔루션 출력
+        print("Optimal solution:", optimal_solution)
         
-        # 최적 입력 생성
-        optimal_input = optimal_input.copy()
+        optimal_input = for_optimal.copy()
         for i, f in enumerate(self.important_features):
             optimal_input[f] = optimal_solution[i]
         optimal_input = optimal_input[self.feature_names]
         
-        print("Optimal input:", optimal_input)  # 디버깅: 최적 입력 출력
+        print("Optimal input:", optimal_input)
         
         return optimal_input, optimal_fitness
 
@@ -158,18 +135,35 @@ def train_cat_with_r2():
 cat_model = train_cat_with_r2()
 
 importance_features = [f'f{i}' for i in range(12)]
-cat_optimizer = GeneticOptimizer(
+
+# 'single' 모드 예시 (단일 행)
+cat_optimizer_single = GeneticOptimizer(
     model=cat_model,
     model_type='catboost',
     feature_names=feature_names,
     X_train=X_train,
     scaler=None,
     desired_value=215,
-    important_feature=importance_features
+    important_feature=importance_features,
+    optimize_mode='single'
 )
-
-# 단일 인덱스 테스트
-optimal_input, optimal_value = cat_optimizer.optimize(for_optimal=X_test.iloc[[0]], init_point=5, n_iter=20)
-print("\nFinal Results (index 0):")
+optimal_input, optimal_value = cat_optimizer_single.optimize(for_optimal=X_test.iloc[[0]], init_point=5, n_iter=20)
+print("\nSingle Mode Results:")
 print("Optimal input:", optimal_input)
 print("Optimal value:", optimal_value)
+
+# 'all' 모드 예시 (다중 행)
+cat_optimizer_all = GeneticOptimizer(
+    model=cat_model,
+    model_type='catboost',
+    feature_names=feature_names,
+    X_train=X_train,
+    scaler=None,
+    desired_value=[215] * len(X_test),  # 다중 행에 대한 desired_value 리스트
+    important_feature=importance_features,
+    optimize_mode='all'
+)
+optimal_input_all, optimal_value_all = cat_optimizer_all.optimize(for_optimal=X_test, init_point=5, n_iter=20)
+print("\nAll Mode Results:")
+print("Optimal input:", optimal_input_all)
+print("Optimal value:", optimal_value_all)
