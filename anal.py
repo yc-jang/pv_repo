@@ -1,4 +1,49 @@
 import pandas as pd
+
+def compare_and_report(folder_dict: dict, param_df: pd.DataFrame) -> bool:
+    """
+    folder_dict : {'01': 'path1', '02': 'path2', ...}
+    param_df    : DataFrame with ['저장폴더','파일명']
+
+    return : bool (True if 완벽히 일치, False otherwise)
+    """
+    # 1) param_df 경로 합치기
+    param_paths = param_df["저장폴더"].astype(str).str.rstrip("/") + "/" + param_df["파일명"].astype(str)
+    # 2) 맨 앞 "P960/" 제거
+    param_paths = param_paths.str.replace(r"^P960/", "", regex=True)
+
+    set_param = set(param_paths)
+    set_folder = set(folder_dict.values())
+
+    is_equal = set_param == set_folder
+
+    # --- 깔끔 출력 ---
+    print("="*40)
+    print(f"📂 folder_dict count : {len(set_folder)}")
+    print(f"📄 param_df   count : {len(set_param)}")
+    print(f"✅ 완벽히 일치 여부 : {is_equal}")
+    print("="*40)
+
+    if not is_equal:
+        only_in_param = sorted(set_param - set_folder)
+        only_in_folder = sorted(set_folder - set_param)
+
+        if only_in_param:
+            print("⚠️ param_df 에만 있는 경로:")
+            for p in only_in_param:
+                print(f"   - {p}")
+
+        if only_in_folder:
+            print("⚠️ folder_dict 에만 있는 경로:")
+            for f in only_in_folder:
+                print(f"   - {f}")
+    else:
+        print("🎉 두 집합이 완벽히 일치합니다.")
+
+    print("="*40)
+    return is_equal
+    
+import pandas as pd
 import numpy as np
 
 def calculate_outlier_stats(file_path, lower_spec=209, upper_spec=213):
