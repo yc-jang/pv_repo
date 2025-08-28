@@ -1,5 +1,70 @@
 from __future__ import annotations
 from pathlib import Path
+import pandas as pd
+import numpy as np
+
+def _ensure_xlsx_path(path: str | Path) -> Path:
+    p = Path(path)
+    if p.suffix.lower() != ".xlsx":
+        raise ValueError(f"엑셀 경로는 .xlsx 여야 합니다: {p}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _prepare_X_for_model(end2end_data: pd.DataFrame, model) -> pd.DataFrame:
+    """
+    end2end_data의 컬럼을 model.X_test.columns 순서로 정렬.
+    - end2end_data가 필요한 컬럼을 모두 포함하는지 확인
+    - 추가 컬럼은 무시(사용 안함)
+    """
+    if not hasattr(model, "X_test") or not hasattr(model.X_test, "columns"):
+        raise AttributeError("model.X_test.columns 를 찾을 수 없습니다.")
+    req_cols = list(model.X_test.columns)
+
+    # 누락 컬럼 검사
+    missing = [c for c in req_cols if c not in end2end_data.columns]
+    if missing:
+        raise ValueError(f"입력 데이터에 누락된 컬럼: {missing}")
+
+    # 모델이 요구하는 순서로 재정렬
+    X_ordered = end2end_data[req_cols].copy()
+    # (선택) 타입/NaN 전처리가 필요하면 여기서 추가
+    return X_ordered
+
+def predict_cat_to_seven(cat_model, end2end_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    - cat_model 기준으로 컬럼 순서 확인/정렬
+    - cat_model 예측 1개를 7개 컬럼으로 복제
+    - index는 end2end_data의 index를 그대로 사용
+    - 항상 (n_rows x 7) DataFrame 반환
+    """
+    X = _prepare_X_for_model(end2end_data, cat_model)
+    y = np.asarray(cat_model.predict(X)).reshape(-1)
+    if len(y) != len(X.index):
+        raise ValueError("예측 길이와 입력 행수가 일치하지 않습니다.")
+
+    out = pd.DataFrame(
+        {f"model_{i}": y for i in range(1, 8)},
+        index=X.index  # 입력 인덱스 유지
+    )
+    return out
+https://github.com/yc-jang/pv_repo/pull/10
+def export_predictions_to_excel(df: pd.DataFrame, model_output_path: str | Path) -> Path:
+    """
+    결과 DataFrame을 지정된 엑셀 경로의 Sheet1에 저장(덮어쓰기).
+    """
+    out = _ensure_xlsx_path(model_output_path)
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Sheet1", index=True)
+    return out
+
+# ========= 사용 예 =========
+# pred_df = predict_cat_to_seven(cat_model, end2end_data)
+# final_path = export_predictions_to_excel(pred_df, "C:/result/model_output.xlsx")
+# print("저장 완료:", final_path)
+
+
+from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
