@@ -1,6 +1,304 @@
 # run.py
 from __future__ import annotations
 
+import argparse
+import json
+import sys
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import pandas as pd
+
+
+# ========= 외부 구현 연결부(당신 프로젝트에 맞게 import 교체) =========
+# from yourpkg.processing import FolderProcessor, process
+# from yourpkg.merge import mergeAll
+# from yourpkg.modeling import CatBoostRunner, predict_all_target
+# from yourpkg.export import export_prediction
+
+# ---- 데모/독립 실행용 더미(실제 프로젝트에선 위 import 사용) ----
+class FolderProcessor:
+    def __init__(self) -> None: ...
+class process:
+    @staticmethod
+    def run(filepath: Path | str, param_csv: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
+        return True, {"example": "dict"}
+class mergeAll:
+    def __init__(self, folder_dict: Dict[str, Any], version: str) -> None:
+        self.folder_dict = folder_dict; self.version = version
+    def load_files(self) -> pd.DataFrame:
+        return pd.DataFrame({"x": [1, 2], "y": [3, 4]})
+class CatBoostRunner:
+    def load_model(self, *args: Any, **kwargs: Any) -> None: ...
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        return pd.Series([0.1] * len(X), name="prediction")
+def predict_all_target(model: CatBoostRunner, data: pd.DataFrame) -> pd.DataFrame:
+    s = model.predict(data); return s.to_frame()
+def export_prediction(pred_df: pd.DataFrame, out_path: Path) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True); pred_df.to_csv(out_path, index=False); return out_path
+# ------------------------------------------------------------------
+
+
+# ===================== Notice(예외 기록) =====================
+
+@dataclass
+class NoticeEntry:
+    """단일 예외 기록 항목."""
+    code: str
+    message: str
+    exception_type: str
+    traceback_str: str
+    context: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class NoticeCollector:
+    """예외만 수집하여 엑셀로 내보낸다."""
+    items: List[NoticeEntry] = field(default_factory=list)
+
+    def add_exception(self, code: str, message: str, exc: BaseException, context: Optional[Dict[str, Any]] = None) -> None:
+        """예외를 수집한다."""
+        # 핵심 원리: 예외 타입/트레이스백을 구조화해 저장
+        self.items.append(
+            NoticeEntry(
+                code=code,
+                message=message,
+                exception_type=exc.__class__.__name__,
+                traceback_str="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                context=context,
+            )
+        )
+
+    def has_items(self) -> bool:
+        """수집된 예외가 있는지."""
+        return len(self.items) > 0
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """엑셀 저장용 DataFrame 생성."""
+        rows = []
+        for it in self.items:
+            rows.append(
+                {
+                    "code": it.code,
+                    "message": it.message,
+                    "exception_type": it.exception_type,
+                    "traceback": it.traceback_str,
+                    "context_json": json.dumps(it.context, ensure_ascii=False) if it.context else None,
+                }
+            )
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["code", "message", "exception_type", "traceback", "context_json"])
+
+    def write_excel(self, path: Path) -> Optional[Path]:
+        """수집된 예외가 있을 때만 notice 엑셀을 쓴다.
+
+        Args:
+            path: 저장 경로 (예: notice/notice.xlsx)
+
+        Returns:
+            실제 저장된 경로 또는 None(예외 미존재/저장 스킵).
+        """
+        if not self.has_items():
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with pd.ExcelWriter(path, engine="openpyxl") as w:
+            self.to_dataframe().to_excel(w, sheet_name="exceptions", index=False)
+        return path
+
+
+# ===================== CLI/입력 =====================
+
+def parsing_filepath() -> Path:
+    """CLI 인자로 전달된 파라미터 CSV 경로를 반환한다.
+
+    Returns:
+        CSV 파일 경로.
+    """
+    # 핵심 원리: argparse로 --params 경로 수신
+    parser = argparse.ArgumentParser(description="Run end-to-end pipeline.")
+    parser.add_argument("--params", type=str, required=True, help="Path to parameter CSV file.")
+    args = parser.parse_args()
+    return Path(args.params)
+
+
+# ===================== 유틸/검증 =====================
+
+def read_params_csv(filepath: Path | str, encoding_candidates: Iterable[str] = ("utf-8", "cp949", "euc-kr")) -> pd.DataFrame:
+    """파라미터 CSV를 안전하게 읽는다.
+
+    Args:
+        filepath: CSV 경로.
+        encoding_candidates: 인코딩 후보.
+
+    Returns:
+        로드된 DataFrame.
+
+    Raises:
+        FileNotFoundError, UnicodeDecodeError, pd.errors.EmptyDataError
+    """
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"CSV not found: {path}")
+    last: Optional[Exception] = None
+    for enc in encoding_candidates:
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except UnicodeDecodeError as e:
+            last = e
+            continue
+    if last:
+        raise last
+    return pd.read_csv(path)
+
+
+def validate_unique_or_raise(df: pd.DataFrame, subset: Optional[Iterable[str]] = None) -> None:
+    """유니크 조건을 만족하지 않으면 예외를 발생시킨다.
+
+    Args:
+        df: 검사 대상 DataFrame.
+        subset: 유니크 기준 컬럼 목록(None이면 전체 행 기준).
+
+    Raises:
+        ValueError: 중복 행이 존재할 때.
+    """
+    # 핵심 원리: duplicated 마스크로 중복 검출
+    dup_mask = df.duplicated(subset=list(subset) if subset else None, keep=False)
+    if dup_mask.any():
+        dup_count = int(dup_mask.sum())
+        raise ValueError(f"Parameter CSV has duplicated rows: {dup_count}")
+
+
+# ===================== 파이프라인 단계 =====================
+
+def run_processing_pipeline(param_csv: pd.DataFrame, filepath: Path | str, unique_subset: Optional[Iterable[str]] = None) -> Tuple[bool, Dict[str, Any]]:
+    """process.run 실행 전 유니크성 검증 후 파이프라인을 진행한다.
+
+    Returns:
+        (is_compared, folder_dict)
+    """
+    # 핵심 원리: 유니크 위반은 예외로 승격 → 상위에서 일괄 기록
+    validate_unique_or_raise(param_csv, unique_subset)
+    processor = FolderProcessor()  # 실제 구현에서 필요시 사용
+    is_compared, folder_dict = process.run(filepath, param_csv)
+    return is_compared, folder_dict
+
+
+def run_merge_and_load(folder_dict: Dict[str, Any], version: str) -> pd.DataFrame:
+    """mergeAll로 병합/로딩."""
+    merger = mergeAll(folder_dict, version)
+    return merger.load_files()
+
+
+def load_model_safely(*load_args: Any, **load_kwargs: Any) -> CatBoostRunner:
+    """CatBoost 모델 로딩."""
+    model = CatBoostRunner()
+    model.load_model(*load_args, **load_kwargs)
+    return model
+
+
+def run_inference_and_export(model: CatBoostRunner, data: pd.DataFrame, export_path: Path) -> Path:
+    """예측 → 저장."""
+    pred_df = predict_all_target(model, data)
+    return export_prediction(pred_df, export_path)
+
+
+# ===================== 메인/에러 수거 & 저장 =====================
+
+NOTICE_XLSX: Path = Path("notice") / "notice.xlsx"
+
+def main() -> int:
+    """메인 진입점.
+
+    Returns:
+        종료 코드(0=성공, 그 외=실패).
+    """
+    # 입력 경로 확보
+    params_path: Path = parsing_filepath()
+
+    # CSV 로드
+    param_csv: pd.DataFrame = read_params_csv(params_path)
+
+    # 파이프라인
+    is_compared, folder_dict = run_processing_pipeline(
+        param_csv=param_csv,
+        filepath=params_path,
+        unique_subset=None,  # 필요 시 ("LOT","DATE") 등으로 지정
+    )
+    if not is_compared:
+        # 비교 실패 자체는 “문제 상태”로 간주 → 예외로 승격하여 notice에 남긴다.
+        raise RuntimeError("Comparison step returned False.")
+
+    # 병합/로딩
+    version = "v1"
+    end2end_data: pd.DataFrame = run_merge_and_load(folder_dict, version)
+
+    # 모델 로딩
+    model = load_model_safely()  # 예: load_model(model_path="model.cbm")
+
+    # 추론/저장
+    out_path = Path("output") / "predictions.csv"
+    run_inference_and_export(model, end2end_data, out_path)
+
+    return 0
+
+
+def safe_main() -> int:
+    """예외를 수거하여 notice.xlsx에 기록하는 래퍼."""
+    notices = NoticeCollector()
+    exit_code = 99
+    try:
+        exit_code = main()
+        return exit_code
+    except (pd.errors.EmptyDataError, FileNotFoundError, UnicodeDecodeError, ValueError, RuntimeError) as e:
+        # 핵심 원리: 알려진 예외는 코드별로 구분
+        code_map = {
+            pd.errors.EmptyDataError: "CSV_EMPTY",
+            FileNotFoundError: "FILE_NOT_FOUND",
+            UnicodeDecodeError: "ENCODING_FAIL",
+            ValueError: "VALIDATION_FAIL",
+            RuntimeError: "PIPELINE_FAIL",
+        }
+        code = code_map.get(e.__class__, "KNOWN_ERROR")
+        notices.add_exception(code=code, message=str(e), exc=e, context=None)
+        exit_map = {
+            "CSV_EMPTY": 10,
+            "FILE_NOT_FOUND": 11,
+            "ENCODING_FAIL": 12,
+            "VALIDATION_FAIL": 13,
+            "PIPELINE_FAIL": 14,
+        }
+        exit_code = exit_map.get(code, 98)
+        return exit_code
+    except Exception as e:
+        # 핵심 원리: 알 수 없는 예외는 UNHANDLED로 기록
+        notices.add_exception(code="UNHANDLED", message=str(e), exc=e, context=None)
+        exit_code = 99
+        return exit_code
+    finally:
+        # 예외가 하나라도 있으면 notice 엑셀 저장
+        try:
+            notices.write_excel(NOTICE_XLSX)
+        except Exception:
+            # 저장 실패 시에는 더 이상 할 일 없음(루프 방지)
+            pass
+
+
+if __name__ == "__main__":
+    # Windows PyInstaller & multiprocessing 대비
+    if sys.platform.startswith("win"):
+        try:
+            from multiprocessing import freeze_support
+            freeze_support()
+        except Exception:
+            pass
+    sys.exit(safe_main())
+
+
+
+# run.py
+from __future__ import annotations
+
 import json
 import sys
 import traceback
