@@ -1,3 +1,365 @@
+# run.py
+from __future__ import annotations
+
+import json
+import sys
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import pandas as pd
+from loguru import logger
+
+# ===== 실제 프로젝트 구현과 연결할 import =====
+# 아래 주석을 당신 프로젝트 구조에 맞게 해제/수정하세요.
+# from yourpkg.io import parsing_filepath
+# from yourpkg.processing import FolderProcessor, process
+# from yourpkg.merge import mergeAll
+# from yourpkg.modeling import CatBoostRunner, predict_all_target
+# from yourpkg.export import export_prediction
+
+# --------- 최소 더미 함수 (실 프로젝트에선 위 import로 대체) ----------
+def parsing_filepath() -> Path:
+    """외부 입력/GUI/CLI 등에서 파라미터 CSV 경로를 획득한다(실 구현으로 교체)."""
+    return Path("params.csv")
+
+class FolderProcessor:
+    def __init__(self) -> None:
+        pass
+
+class process:
+    @staticmethod
+    def run(filepath: Path | str, param_csv: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
+        return True, {"example": "dict"}
+
+class mergeAll:
+    def __init__(self, folder_dict: Dict[str, Any], version: str) -> None:
+        self.folder_dict = folder_dict
+        self.version = version
+    def load_files(self) -> pd.DataFrame:
+        return pd.DataFrame({"x": [1,2], "y":[3,4]})
+
+class CatBoostRunner:
+    def __init__(self) -> None:
+        self._loaded = False
+    def load_model(self, *args: Any, **kwargs: Any) -> None:
+        self._loaded = True
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        return pd.Series([0.1]*len(X), name="prediction")
+
+def predict_all_target(model: CatBoostRunner, data: pd.DataFrame) -> pd.DataFrame:
+    preds = model.predict(data)
+    return preds.to_frame() if isinstance(preds, pd.Series) else pd.DataFrame({"prediction": preds})
+
+def export_prediction(pred_df: pd.DataFrame, out_path: Path) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pred_df.to_csv(out_path, index=False)
+    return out_path
+# -------------------------------------------------------------------
+
+
+# ===== Notice 기록 시스템 =====
+
+@dataclass
+class NoticeItem:
+    """Notice 단일 항목."""
+    level: str
+    code: str
+    message: str
+    context: Optional[Dict[str, Any]] = None
+
+@dataclass
+class NoticeBuffer:
+    """엑셀로 내보낼 Notice를 버퍼링."""
+    items: List[NoticeItem] = field(default_factory=list)
+
+    def add(self, level: str, code: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
+        # 핵심 원리: 실행 중 알림/에러를 구조화하여 수집
+        self.items.append(NoticeItem(level=level, code=code, message=message, context=context))
+
+    def to_dataframe(self) -> pd.DataFrame:
+        # 핵심 원리: context는 JSON 문자열로 직렬화
+        rows = []
+        for it in self.items:
+            rows.append({
+                "level": it.level,
+                "code": it.code,
+                "message": it.message,
+                "context_json": json.dumps(it.context, ensure_ascii=False) if it.context else None,
+            })
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["level","code","message","context_json"])
+
+    def write_excel(self, path: Path, extra_sheets: Optional[Dict[str, pd.DataFrame]] = None) -> Path:
+        """Notice를 지정 엑셀 경로로 저장.
+
+        Args:
+            path: 저장 경로 (예: notice/notice.xlsx).
+            extra_sheets: 추가로 함께 저장할 시트들(예: 중복행 등).
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            self.to_dataframe().to_excel(writer, sheet_name="notices", index=False)
+            if extra_sheets:
+                for name, df in extra_sheets.items():
+                    df.to_excel(writer, sheet_name=name[:31] or "extra", index=False)
+        return path
+
+
+# ===== 로깅 설정 =====
+
+def configure_logging(level: str = "INFO") -> None:
+    """loguru 로깅 설정(개발용 콘솔 출력)."""
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level=level,
+        format="{time:YYYY-MM-DD HH:mm:ss} {level} [{name}:{line}] {message}",
+        backtrace=False,
+        diagnose=False,
+    )
+
+
+# ===== 유틸/검증 =====
+
+def read_params_csv(
+    filepath: Path | str,
+    notice: NoticeBuffer,
+    encoding_candidates: Iterable[str] = ("utf-8", "cp949", "euc-kr"),
+) -> pd.DataFrame:
+    """파라미터 CSV를 안전하게 읽는다.
+
+    Args:
+        filepath: CSV 경로.
+        notice: NoticeBuffer 인스턴스.
+        encoding_candidates: 인코딩 후보.
+
+    Returns:
+        로드된 DataFrame.
+
+    Raises:
+        FileNotFoundError, UnicodeDecodeError, pd.errors.EmptyDataError
+    """
+    path = Path(filepath)
+    if not path.exists():
+        # 경로 오류 notice
+        notice.add("ERROR", "CSV_NOT_FOUND", "파라미터 CSV를 찾을 수 없습니다.", {"path": str(path)})
+        raise FileNotFoundError(f"CSV not found: {path}")
+
+    last_exc: Optional[Exception] = None
+    for enc in encoding_candidates:
+        try:
+            df = pd.read_csv(path, encoding=enc)
+            logger.info(f"CSV loaded with encoding='{enc}': {path.name}")
+            notice.add("INFO", "CSV_LOADED", "CSV 로드 성공", {"path": str(path), "encoding": enc, "shape": list(df.shape)})
+            return df
+        except UnicodeDecodeError as e:
+            last_exc = e
+            notice.add("WARNING", "CSV_DECODE_FAIL", "인코딩 시도 실패", {"path": str(path), "encoding": enc})
+            continue
+    # 모든 인코딩 실패
+    notice.add("ERROR", "CSV_DECODE_ALL_FAIL", "모든 인코딩 후보에서 CSV 해독에 실패했습니다.", {"path": str(path), "encodings": list(encoding_candidates)})
+    if last_exc:
+        raise last_exc
+    # 방어적 코드
+    return pd.read_csv(path)
+
+
+def validate_unique(
+    df: pd.DataFrame,
+    notice: NoticeBuffer,
+    subset: Optional[Iterable[str]] = None
+) -> Tuple[pd.Series, Optional[pd.DataFrame]]:
+    """유니크성 검사.
+
+    Args:
+        df: 대상 DataFrame.
+        notice: NoticeBuffer.
+        subset: 유니크 기준 컬럼 목록(None이면 전체 행 기준).
+
+    Returns:
+        (유니크 판정 시리즈, 중복행 DF or None)
+    """
+    dup_mask = df.duplicated(subset=list(subset) if subset else None, keep=False)
+    ok = ~dup_mask
+    if ok.all():
+        notice.add("INFO", "PARAM_UNIQUE_OK", "파라미터 유니크성 검사를 통과했습니다.", {"subset": list(subset) if subset else "ALL"})
+        return ok, None
+    # 중복행 수집
+    dup_df = df[dup_mask].copy()
+    notice.add(
+        "ERROR",
+        "PARAM_DUPLICATED",
+        f"파라미터에 중복 행이 {len(dup_df)}건 존재합니다.",
+        {"subset": list(subset) if subset else "ALL", "dup_count": int(len(dup_df))}
+    )
+    return ok, dup_df
+
+
+# ===== 파이프라인 단계 =====
+
+def run_processing_pipeline(
+    param_csv: pd.DataFrame,
+    filepath: Path | str,
+    notice: NoticeBuffer,
+    unique_subset: Optional[Iterable[str]] = None,
+) -> Tuple[bool, Dict[str, Any], Optional[pd.DataFrame]]:
+    """폴더 처리 파이프라인.
+
+    Returns:
+        (is_compared, folder_dict, dup_df)
+    """
+    # 유니크 검증
+    check_unique, dup_df = validate_unique(param_csv, notice, unique_subset)
+    if not check_unique.all():
+        logger.error("Parameter CSV duplication detected.")
+        return False, {}, dup_df
+
+    # 폴더 처리
+    processor = FolderProcessor()
+    logger.info("FolderProcessor initialized.")
+    is_compared, folder_dict = process.run(filepath, param_csv)
+    notice.add(
+        "INFO",
+        "PROCESS_RUN_DONE",
+        "process.run 완료",
+        {"is_compared": bool(is_compared), "folder_keys": list(folder_dict.keys()) if folder_dict else []}
+    )
+    return is_compared, folder_dict, None
+
+
+def run_merge_and_load(folder_dict: Dict[str, Any], version: str, notice: NoticeBuffer) -> pd.DataFrame:
+    """mergeAll로 병합/로딩."""
+    merger = mergeAll(folder_dict, version)
+    end2end = merger.load_files()
+    notice.add("INFO", "MERGE_COMPLETED", "데이터 병합 완료", {"shape": list(end2end.shape), "version": version})
+    return end2end
+
+
+def load_model_safely(cat_model: CatBoostRunner, notice: NoticeBuffer, *load_args: Any, **load_kwargs: Any) -> CatBoostRunner:
+    """CatBoost 모델 로딩."""
+    cat_model.load_model(*load_args, **load_kwargs)
+    notice.add("INFO", "MODEL_LOADED", "CatBoost 모델 로드 완료", {})
+    return cat_model
+
+
+def run_inference_and_export(
+    model: CatBoostRunner,
+    data: pd.DataFrame,
+    export_path: Path,
+    notice: NoticeBuffer,
+) -> Path:
+    """예측 → 저장."""
+    pred_df = predict_all_target(model, data)
+    saved = export_prediction(pred_df, export_path)
+    notice.add("INFO", "PRED_EXPORTED", "예측 결과 내보내기 완료", {"rows": int(len(pred_df)), "out_path": str(saved)})
+    return saved
+
+
+# ===== 메인 엔트리 =====
+
+NOTICE_XLSX: Path = Path("notice") / "notice.xlsx"  # 반드시 적용 경로
+
+def main() -> Tuple[int, NoticeBuffer, Dict[str, pd.DataFrame]]:
+    """메인 로직.
+
+    Returns:
+        (exit_code, notice_buffer, extra_sheets)
+    """
+    configure_logging(level="INFO")
+    logger.info("=== Application start ===")
+
+    notice = NoticeBuffer()
+    extra_sheets: Dict[str, pd.DataFrame] = {}
+
+    # 입력 경로
+    filepath: Path = parsing_filepath()
+    notice.add("INFO", "PARAM_PATH", "파라미터 CSV 경로 확보", {"path": str(filepath)})
+
+    # CSV 로드
+    param_csv: pd.DataFrame = read_params_csv(filepath, notice)
+
+    # 파이프라인
+    is_compared, folder_dict, dup_df = run_processing_pipeline(
+        param_csv=param_csv,
+        filepath=filepath,
+        notice=notice,
+        unique_subset=None,  # 예: ("LOT", "DATE") 등 실제 키로 지정 가능
+    )
+    if dup_df is not None and not dup_df.empty:
+        extra_sheets["duplicated_rows"] = dup_df
+
+    if not is_compared:
+        notice.add("ERROR", "COMPARE_FAILED", "비교 단계 실패 또는 이슈 발견으로 중단.", {})
+        return 2, notice, extra_sheets
+
+    # 병합/로딩
+    version = "v1"
+    end2end_data: pd.DataFrame = run_merge_and_load(folder_dict, version, notice)
+
+    # 모델 로딩
+    cat_model = CatBoostRunner()
+    load_model_safely(cat_model, notice)  # 예: model_path="model.cbm"
+
+    # 추론/저장
+    out_path = Path("output") / "predictions.csv"
+    run_inference_and_export(cat_model, end2end_data, out_path, notice)
+
+    notice.add("INFO", "PIPELINE_DONE", "전체 파이프라인 완료", {})
+    logger.info("=== Application finished successfully ===")
+    return 0, notice, extra_sheets
+
+
+def safe_main() -> int:
+    """예외 안전 래퍼: 항상 notice.xlsx를 기록한다."""
+    exit_code: int = 99
+    notice: NoticeBuffer = NoticeBuffer()
+    extra_sheets: Dict[str, pd.DataFrame] = {}
+    try:
+        exit_code, notice, extra_sheets = main()
+        return exit_code
+    except pd.errors.EmptyDataError as e:
+        logger.exception("Empty CSV.")
+        notice.add("ERROR", "CSV_EMPTY", "CSV 파일이 비어 있습니다.", {"exception": str(e)})
+        exit_code = 10
+        return exit_code
+    except FileNotFoundError as e:
+        logger.exception("File not found.")
+        notice.add("ERROR", "FILE_NOT_FOUND", "필요한 파일을 찾을 수 없습니다.", {"exception": str(e)})
+        exit_code = 11
+        return exit_code
+    except UnicodeDecodeError as e:
+        logger.exception("Encoding failed.")
+        notice.add("ERROR", "ENCODING_FAIL", "CSV 인코딩에 실패했습니다.", {"exception": str(e)})
+        exit_code = 12
+        return exit_code
+    except Exception as e:
+        logger.error(f"Unhandled exception: {e}\n{traceback.format_exc()}")
+        notice.add("ERROR", "UNHANDLED", "처리되지 않은 예외가 발생했습니다.", {"exception": str(e)})
+        exit_code = 99
+        return exit_code
+    finally:
+        # >>> 반드시 notice 엑셀을 기록 <<<
+        try:
+            path = NOTICE_XLSX
+            saved = notice.write_excel(path, extra_sheets=extra_sheets or None)
+            logger.info(f"Notice written to: {saved}")
+        except Exception as e:
+            # notice 저장 자체 실패는 콘솔 로그로만 남김(루프 방지)
+            logger.error(f"Failed to write notice Excel: {e}")
+
+
+if __name__ == "__main__":
+    if sys.platform.startswith("win"):
+        try:
+            from multiprocessing import freeze_support
+            freeze_support()
+        except Exception:
+            pass
+    sys.exit(safe_main())
+
+
+
 from __future__ import annotations
 from pathlib import Path
 import pandas as pd
