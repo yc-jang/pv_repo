@@ -530,13 +530,12 @@ def shap_summary_bar(self, topk: int = 20) -> tuple[pd.DataFrame, go.Figure]:
     )
     return df, fig
 
-
     from typing import Optional, List, Tuple, Any
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-def plot_waterfall_with_mean(
+def plot_waterfall_with_mean_global_order(
     self,
     idx: int | None = None,
     model_input: Optional[pd.DataFrame] = None,
@@ -546,27 +545,35 @@ def plot_waterfall_with_mean(
     numeric_mean_fmt: str = "{:.3f}",
     show: bool = False,
 ) -> Tuple[pd.DataFrame, go.Figure]:
-    """SHAP 워터폴(가로형, SHAP 스타일 모사): feature 라벨에 (Avg:μ) 포함,
-    조건 컬럼만 선택/기타 묶기 로직은 기존 구현을 그대로 반영.
+    """Plotly 기반 SHAP 워터폴(전역 중요도 순서 고정).
+
+    피처 순서는 shap_summary_bar(topk)의 Mean|SHAP| 내림차순 순서를 **항상** 따른다.
+    특정 idx의 기여(Δ)는 해당 전역 순서대로 누적하여 표시한다.
 
     Returns:
         df: ['feature','delta','abs_delta','sample_value','dataset_mean','rank',
              'base','prediction','idx','cum_before','cum_after']
-        fig: Plotly Figure (가로형 워터폴)
+        fig: Plotly Figure (가로형 워터폴; 상단=가장 중요한 피처)
     """
-    # ---------------- 0) 입력/인덱스 ----------------
+    # ---------- 0) 입력/인덱스 ----------
     X = model_input if model_input is not None else self.X_test
     if X is None or len(X) == 0:
         raise ValueError("X_test 또는 model_input이 필요합니다.")
     cols = list(self.columns) if self.columns is not None else list(X.columns)
 
+    # 샘플 선택
     if idx is None:
         y_pred_all = np.asarray(self.predict(X))
         idx = int(np.argsort(y_pred_all)[len(y_pred_all) // 2])
     if not (0 <= idx < len(X)):
         raise IndexError("idx가 입력 데이터 범위를 벗어났습니다.")
 
-    # ---------------- 1) SHAP 값 확보 ----------------
+    # ---------- 1) 전역 중요도 순서 확보 (Mean|SHAP|) ----------
+    # shap_summary_bar는 self.columns(원본 피처명)을 사용한다고 가정
+    imp_df, _ = self.shap_summary_bar(topk=topk)  # columns: ['feature','mean_abs_shap', ...]
+    global_order_raw: List[str] = imp_df["feature"].tolist()
+
+    # ---------- 2) SHAP 값 확보 (저장본 우선, 없으면 지연계산) ----------
     if getattr(self, "_shap_values_loaded", None) is not None and getattr(self, "_y_pred_test_loaded", None) is not None:
         shap_vals_all = np.asarray(self._shap_values_loaded)
         base_value = getattr(self, "_shap_base_value_loaded", None)
@@ -585,7 +592,7 @@ def plot_waterfall_with_mean(
     phi = shap_vals_all[idx, :]
     x_row = X.iloc[idx, :].values
 
-    # ---------------- 2) 평균/최빈 라벨 ----------------
+    # ---------- 3) 평균/최빈 라벨 ----------
     def _avg_label(series: pd.Series) -> str:
         if pd.api.types.is_numeric_dtype(series):
             return numeric_mean_fmt.format(float(series.mean()))
@@ -593,54 +600,64 @@ def plot_waterfall_with_mean(
         return str(mode.iloc[0]) if len(mode) > 0 else "NA"
 
     mean_map = {c: _avg_label(X[c]) for c in cols}
-    annotated_names = [f"(Avg:{mean_map[c]}) | {c}" for c in cols]
+    # 전역 순서 입력은 '원본 피처명'이므로, 표시에 쓸 라벨은 여기서 조립
+    annotated = {c: f"(Avg:{mean_map[c]}) | {c}" for c in cols}
 
-    # ---------------- 3) 피처 선택 + 기타 묶기 ----------------
+    # ---------- 4) 노출 피처 선택 = 전역 순서 (condition_columns가 있으면 교집합 유지) ----------
     if condition_columns:
         cond_set = set(condition_columns)
-        keep_idx = [i for i, c in enumerate(cols) if c in cond_set]
+        selected_raw = [f for f in global_order_raw if f in cond_set]
     else:
-        order = np.argsort(np.abs(phi))[::-1]
-        keep_idx = list(order[: max(1, topk)])
-    other_idx = [i for i in range(len(cols)) if i not in keep_idx]
+        selected_raw = list(global_order_raw)  # topk개
 
-    names = [annotated_names[i] for i in keep_idx]
+    # 해당 순서에 맞는 인덱스/Δ/샘플/라벨
+    name_to_idx = {c: i for i, c in enumerate(cols)}
+    keep_idx = [name_to_idx[f] for f in selected_raw if f in name_to_idx]
+
+    names = [annotated[cols[i]] for i in keep_idx]
     deltas = [float(phi[i]) for i in keep_idx]
     sample_vals = [x_row[i] for i in keep_idx]
     ds_means = [mean_map[cols[i]] for i in keep_idx]
 
+    # 기타 묶기: 전역 topk/조건에 없는 나머지
+    other_idx = [i for i in range(len(cols)) if i not in keep_idx]
+    other_label = None
     if aggregate_others and len(other_idx) > 0:
         other_sum = float(np.sum(phi[other_idx]))
         other_df = X.iloc[:, other_idx]
-        if all(pd.api.types.is_numeric_dtype(other_df[c]) for c in other_df.columns):
-            other_sample_scalar = float(np.mean(other_df.iloc[idx, :]))
-            other_mean_text = numeric_mean_fmt.format(float(other_df.values.mean()))
+        if len(other_idx) > 0:
+            if all(pd.api.types.is_numeric_dtype(other_df[c]) for c in other_df.columns):
+                other_sample_scalar = float(np.mean(other_df.iloc[idx, :]))
+                other_mean_text = numeric_mean_fmt.format(float(other_df.values.mean()))
+            else:
+                flat_s = pd.Series(other_df.iloc[idx, :])
+                mode_all = flat_s.mode(dropna=True)
+                other_sample_scalar = str(mode_all.iloc[0]) if len(mode_all) > 0 else "NA"
+                other_mean_text = "mixed"
         else:
-            flat_s = pd.Series(other_df.iloc[idx, :])
-            mode_all = flat_s.mode(dropna=True)
-            other_sample_scalar = str(mode_all.iloc[0]) if len(mode_all) > 0 else "NA"
-            other_mean_text = "mixed"
-        names.append(f"(Avg:{other_mean_text}) | (Other Features)")
+            other_sample_scalar, other_mean_text = 0.0, "NA"
+
+        other_label = f"(Avg:{other_mean_text}) | (Other Features)"
+        # 전역 순서 고정이므로, 기타는 항상 **맨 아래**로 배치
+        names.append(other_label)
         deltas.append(other_sum)
         sample_vals.append(other_sample_scalar)
         ds_means.append(other_mean_text)
 
-    # ---------------- 4) DF + 누적 경로(cum_before/after) ----------------
+    # ---------- 5) 누적 경로(cum_before/after) (전역 순서 기준) ----------
     base = float(base_value)
-    cum_before = []
-    cum_after = []
+    cum_before, cum_after = [], []
     cur = base
     for d in deltas:
-        # SHAP waterfall 규칙: 현재 값에서 +d면 오른쪽으로, -d면 왼쪽으로
         start = cur if d >= 0 else cur + d
-        end = start + abs(d)  # 시각화용 너비
         cum_before.append(start)
-        cum_after.append(start + (abs(d)))  # 실제 끝점(그림용)
-        cur = cur + d  # 다음 단계 누적 갱신
+        cum_after.append(start + abs(d))
+        cur = cur + d
     pred = cur
 
     abs_d = np.abs(deltas)
-    ranks = list(np.argsort(abs_d)[::-1] + 1)
+    # rank는 전역 순서이므로 1..k
+    ranks = list(range(1, len(deltas) + 1))
 
     df = pd.DataFrame({
         "feature": names,
@@ -656,18 +673,19 @@ def plot_waterfall_with_mean(
         "cum_after": cum_after,
     })
 
-    # ---------------- 5) Plotly (가로형, per-feature base) ----------------
-    # y축: 위에서 아래로 피처 나열(SHAP와 유사), x축: 출력 스케일
-    y = list(reversed(names))                 # 위에 영향 큰 항목 오도록 역순(원하면 변경 가능)
-    order = list(range(len(names)-1, -1, -1)) # df 인덱스 매핑
-
+    # ---------- 6) Plotly(가로형 워터폴; 상단=가장 중요한 피처) ----------
     fig = go.Figure()
-    for i, yi in zip(order, y):
+    for i, yi in enumerate(names):
         d = deltas[i]
         start = cum_before[i]
         width = abs(d)
-        color = "rgba(214,39,40,0.8)" if d < 0 else "rgba(31,119,180,0.8)"  # 음수 빨강/양수 파랑 (원하면 변경)
-        text = f"{yi}<br>μ={df['dataset_mean'][i]} | v={df['sample_value'][i]} | Δ={d:+.4g}"
+        color = "rgba(214,39,40,0.85)" if d < 0 else "rgba(31,119,180,0.85)"
+        # 표시 텍스트: (Avg:μ) | name → μ, name, v, Δ
+        mu_disp = ds_means[i]
+        feat_disp = yi.split(" | ", 1)[1] if " | " in yi else yi
+        v_disp = sample_vals[i]
+        v_txt = numeric_mean_fmt.format(float(v_disp)) if isinstance(v_disp, (int, float, np.floating)) else str(v_disp)
+        hover = f"{feat_disp}<br>μ={mu_disp} | v={v_txt} | Δ={d:+.4g}"
 
         fig.add_trace(go.Bar(
             y=[yi],
@@ -675,23 +693,25 @@ def plot_waterfall_with_mean(
             base=[start],
             orientation="h",
             marker_color=color,
-            hovertemplate=text.replace("<br>", "<br>") + "<extra></extra>",
+            hovertemplate=hover + "<extra></extra>",
             text=[f"{d:+.4g}"],
-            textposition="outside"
+            textposition="outside",
         ))
 
-    # 기준선/최종선(세로라인)
-    fig.add_vline(x=base, line=dict(color="gray", dash="dot"), annotation_text="base", annotation_position="top left")
-    fig.add_vline(x=pred, line=dict(color="green", dash="dot"), annotation_text="prediction", annotation_position="top right")
+    # 기준선/최종선
+    fig.add_vline(x=base, line=dict(color="gray", dash="dot"),
+                  annotation_text="base", annotation_position="top left")
+    fig.add_vline(x=pred, line=dict(color="green", dash="dot"),
+                  annotation_text="prediction", annotation_position="top right")
 
     fig.update_layout(
-        title=f"[{getattr(self, 'model_name', 'Model')}] SHAP Waterfall (idx={idx}, "
-              f"{'cond' if (condition_columns and len(condition_columns)>0) else f'top{topk}'})",
+        title=f"[{getattr(self, 'model_name', 'Model')}] SHAP Waterfall (idx={idx}, global-order top{topk}"
+              f"{', cond' if (condition_columns and len(condition_columns)>0) else ''})",
         xaxis_title="Model output",
         yaxis_title="Feature (Avg | name)",
         barmode="overlay",
         template="plotly_white",
-        margin=dict(l=140, r=40, t=70, b=40),
+        margin=dict(l=160, r=40, t=70, b=40),
         showlegend=False,
     )
 
@@ -700,6 +720,7 @@ def plot_waterfall_with_mean(
 
     return df, fig
     
+
     def shap_importance_df(self, topk: Optional[int] = 30) -> Optional[pd.DataFrame]:
         """Return mean|SHAP| importance DataFrame on X_test (topk)."""
         if self.explainer is None or self.X_test is None:
