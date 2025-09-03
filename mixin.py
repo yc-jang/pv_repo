@@ -530,129 +530,142 @@ def shap_summary_bar(self, topk: int = 20) -> tuple[pd.DataFrame, go.Figure]:
     )
     return df, fig
 
-# 3) 워터폴 플롯: 단일 샘플의 기여도 + (값, μ) 라벨
-def shap_waterfall(self,
-                   index: Optional[int] = None,
-                   pick: str = "median_pred",
-                   topk: int = 20,
-                   title: Optional[str] = None) -> go.Figure:
-    """단일 관측치 워터폴(상위 기여 topk) + 각 피처 '값(v), 평균(μ)' 라벨.
+    def plot_waterfall_with_mean(
+    self,
+    idx: int | None = None,
+    model_input: Optional[pd.DataFrame] = None,
+    condition_columns: Optional[List[str]] = None,
+    topk: int = 20,
+    aggregate_others: bool = True,
+    numeric_mean_fmt: str = "{:.3f}",
+    show: bool = True,
+):
+    """SHAP 워터폴(한 샘플) 시각화: feature 라벨에 (Avg:μ) 포함 및 조건 컬럼만 선택/기타 묶기.
+
+    사용 예:
+        runner = CatBoostRunner().load_model(path)
+        runner.plot_waterfall_with_mean(idx=0, topk=20)
+        runner.plot_waterfall_with_mean(idx=None, condition_columns=["f1","f2"])
 
     Args:
-        index: X_test의 정수 위치 인덱스(라벨 인덱스 아님). None이면 pick 전략 사용.
-        pick: 'median_pred' | 'min_resid' | 'max_resid'
-        topk: 상위 기여 피처 수
-        title: 플롯 제목
+        idx: X_test 내 정수 위치 인덱스(라벨 인덱스 아님). None이면 중앙값 예측에 가까운 샘플 선택.
+        model_input: 해석에 사용할 입력 DF. 기본은 self.X_test.
+        condition_columns: 지정 시, 해당 컬럼들만 남기고 나머지는 "(Other Features)"로 합산.
+        topk: 조건 미지정 시, |SHAP| 상위 topk만 남기고 나머지 합산.
+        aggregate_others: True면 나머지 피처를 "(Other Features)"로 묶음.
+        numeric_mean_fmt: 숫자 평균 표기 포맷.
+        show: True면 즉시 플로팅(shap.plots.waterfall). False면 (Explanation, None) 반환.
+
+    Returns:
+        Tuple[shap.Explanation, Any]: (변형된 단일행 Explanation, matplotlib Axes or None)
     """
-    if self.X_test is None or self.y_test is None:
-        raise ValueError("X_test / y_test가 필요합니다.")
-    shap_vals, base = self._ensure_shap_values()
+    import shap
+    import numpy as np
+    import pandas as pd
 
-    X = self.X_test
-    y = self.y_test
-    y_pred = (np.asarray(self._y_pred_test_loaded) if getattr(self, "_y_pred_test_loaded", None) is not None
-              else np.asarray(self.predict(X)))
-    resid = y.values - y_pred
+    # 0) 입력/인덱스 확정
+    X = model_input if model_input is not None else self.X_test
+    if X is None or len(X) == 0:
+        raise ValueError("X_test 또는 model_input이 필요합니다.")
+    cols = list(self.columns) if self.columns is not None else list(X.columns)
 
-    # 샘플 선택
-    if index is None:
-        if pick == "median_pred":
-            idx = int(np.argsort(y_pred)[len(y_pred)//2])
-        elif pick == "min_resid":
-            idx = int(np.argmin(np.abs(resid)))
-        elif pick == "max_resid":
-            idx = int(np.argmax(np.abs(resid)))
-        else:
-            idx = 0
+    # 샘플 선택: idx 없으면 예측 중앙값에 가장 가까운 샘플
+    if idx is None:
+        y_pred_all = np.asarray(self.predict(X))
+        idx = int(np.argsort(y_pred_all)[len(y_pred_all) // 2])
+    if not (0 <= idx < len(X)):
+        raise IndexError("idx가 입력 데이터 범위를 벗어났습니다.")
+
+    # 1) SHAP 값 준비: 저장본 우선, 없으면 지연 계산
+    if getattr(self, "_shap_values_loaded", None) is not None and getattr(self, "_y_pred_test_loaded", None) is not None:
+        shap_vals_all = np.asarray(self._shap_values_loaded)
+        base_value = getattr(self, "_shap_base_value_loaded", None)
+        if base_value is None:
+            # fallback: base ≈ mean(pred - sum(phi))
+            s = shap_vals_all.sum(axis=1)
+            base_value = float(np.mean(self._y_pred_test_loaded - s))
     else:
-        idx = int(index)
-        if not (0 <= idx < len(X)):
-            raise IndexError("index가 X_test 범위를 벗어났습니다.")
+        if self.explainer is None:
+            self.explainer = shap.Explainer(self.model)
+        exp_all = self.explainer(X)
+        shap_vals_all = np.asarray(exp_all.values)
+        base_raw = exp_all.base_values
+        base_value = float(np.mean(base_raw)) if np.ndim(base_raw) > 0 else float(base_raw)
 
-    # 대상 행의 shap 기여 가져오기
-    phi = shap_vals[idx, :]  # (n_features,)
-    if self.columns is None:
-        feats = np.array([f"f{i}" for i in range(phi.shape[0])])
+    # 단일 행 추출
+    phi = shap_vals_all[idx, :]  # (n_features,)
+    x_row = X.iloc[idx, :].values
+
+    # 2) 평균(혹은 최빈)으로 라벨 생성
+    # 숫자 → 평균, 범주 → 최빈
+    def _avg_label(series: pd.Series) -> str:
+        if pd.api.types.is_numeric_dtype(series):
+            return numeric_mean_fmt.format(float(series.mean()))
+        mode = series.mode(dropna=True)
+        return str(mode.iloc[0]) if len(mode) > 0 else "NA"
+
+    data_mean_map = {c: _avg_label(X[c]) for c in cols}
+    updated_feature_names = [f"(Avg:{data_mean_map[c]}) | {c}" for c in cols]
+
+    # 3) 조건 컬럼만 남기고 나머지 묶기(또는 topk 기준으로 묶기)
+    if condition_columns is not None and len(condition_columns) > 0:
+        cond_set = set(condition_columns)
+        cond_idx = [i for i, c in enumerate(cols) if c in cond_set]
+        other_idx = [i for i in range(len(cols)) if i not in cond_set]
     else:
-        feats = np.array(list(self.columns))
+        # topk 기준
+        order = np.argsort(np.abs(phi))[::-1]
+        keep_idx = list(order[: max(1, topk)])
+        other_idx = [i for i in range(len(cols)) if i not in keep_idx]
+        cond_idx = keep_idx
 
-    # 상위 |기여| topk 선택
-    order = np.argsort(np.abs(phi))[::-1][:topk]
-    feats_k = feats[order]
-    phi_k = phi[order]
+    # cond 부분
+    values_keep = phi[cond_idx].astype(float)
+    data_keep = x_row[cond_idx]
+    names_keep = [updated_feature_names[i] for i in cond_idx]
 
-    # 관측값 v, 평균 μ 계산(숫자는 mean, 범주는 최빈값 표기)
-    mu_texts = []
-    val_texts = []
-    for f in feats_k:
-        s = X[f]
-        if pd.api.types.is_numeric_dtype(s):
-            mu = float(s.mean())
-            v = float(s.iloc[idx])
-            mu_texts.append(f"μ={mu:.4g}")
-            val_texts.append(f"v={v:.4g}")
+    # other 부분(합산/평균)
+    values, data, names = list(values_keep), list(data_keep), list(names_keep)
+    if aggregate_others and len(other_idx) > 0:
+        other_sum = float(np.sum(phi[other_idx]))
+        # data는 스칼라로 표기: 숫자 평균 또는 범주 최빈값
+        # 숫자/범주 혼합 가능 ⇒ 숫자만 평균, 나머지 무시 → 전부 숫자 변환 실패 시 'NA'
+        other_series = X.iloc[:, other_idx]
+        if all(pd.api.types.is_numeric_dtype(other_series[c]) for c in other_series.columns):
+            other_data_scalar = float(np.mean(other_series.iloc[idx, :]))
+            other_avg_label = numeric_mean_fmt.format(float(other_series.values.mean()))
         else:
-            mu = s.mode(dropna=True)
-            mu_str = str(mu.iloc[0]) if len(mu) > 0 else "NA"
-            v_str = str(s.iloc[idx])
-            mu_texts.append(f"μ={mu_str}")
-            val_texts.append(f"v={v_str}")
+            # 범주 포함 → 최빈
+            flat_s = pd.Series(other_series.iloc[idx, :])
+            mode_all = flat_s.mode(dropna=True)
+            other_data_scalar = str(mode_all.iloc[0]) if len(mode_all) > 0 else "NA"
+            # 평균 라벨은 계산 애매 → 'mixed'
+            other_avg_label = "mixed"
 
-    # 워터폴 누적: base → base+Σphi_k
-    contrib = phi_k
-    cum = [base]
-    for c in contrib:
-        cum.append(cum[-1] + c)
-    start_vals = cum[:-1]
-    end_vals = cum[1:]
-    deltas = end_vals - np.array(start_vals)
+        values.append(other_sum)
+        data.append(other_data_scalar)
+        names.append(f"(Avg:{other_avg_label}) | (Other Features)")
 
-    # 막대 생성
-    colors = ["#1f77b4" if d >= 0 else "#d62728" for d in deltas]
-    texts = [f"{feats_k[i]}<br>{val_texts[i]} | {mu_texts[i]}<br>Δ={deltas[i]:.4g}"
-             for i in range(len(deltas))]
-
-    fig = go.Figure()
-    # base
-    fig.add_trace(go.Bar(
-        x=["base"],
-        y=[base],
-        marker_color="#7f7f7f",
-        text=[f"base={base:.4g}"],
-        textposition="outside",
-        name="base"
-    ))
-    # each feature contribution
-    for i in range(len(deltas)):
-        fig.add_trace(go.Bar(
-            x=[feats_k[i]],
-            y=[deltas[i]],
-            base=start_vals[i],
-            marker_color=colors[i],
-            text=[texts[i]],
-            textposition="outside",
-            name=f"{feats_k[i]}"
-        ))
-    # 최종 예측선
-    final_pred = float(base + phi_k.sum())
-    fig.add_shape(type="line",
-                  x0=-0.5, x1=len(deltas)+0.5,
-                  y0=final_pred, y1=final_pred,
-                  line=dict(color="#2ca02c", dash="dot"))
-    fig.add_annotation(x=len(deltas)/2, y=final_pred,
-                       text=f"prediction={final_pred:.4g}",
-                       showarrow=False, yshift=8)
-
-    fig.update_layout(
-        title=title or f"[{self.model_name}] SHAP Waterfall (idx={idx}, top{topk})",
-        xaxis_title="Feature",
-        yaxis_title="Contribution (cumulative)",
-        template="plotly_white",
-        barmode="stack",
-        showlegend=False,
-        margin=dict(l=40, r=20, t=70, b=40)
+    # 4) shap.Explanation 재구성(단일 샘플)
+    new_exp = shap.Explanation(
+        values=np.array(values, dtype=float),
+        base_values=float(base_value),
+        data=np.array(data, dtype=object),
+        feature_names=names,
     )
-    return fig
+
+    # 5) 플롯
+    if show:
+        try:
+            import shap.plots as splots
+            ax = splots.waterfall(new_exp, max_display=len(values))
+            return new_exp, ax
+        except Exception:
+            # shap plotting 실패 시 None 반환(사용자 환경에서 plotly 등 대안 사용 가능)
+            return new_exp, None
+    else:
+        return new_exp, None
+
     
     def shap_importance_df(self, topk: Optional[int] = 30) -> Optional[pd.DataFrame]:
         """Return mean|SHAP| importance DataFrame on X_test (topk)."""
