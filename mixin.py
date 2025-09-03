@@ -666,6 +666,174 @@ def shap_summary_bar(self, topk: int = 20) -> tuple[pd.DataFrame, go.Figure]:
     else:
         return new_exp, None
 
+    from typing import Optional, List, Tuple, Any
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+def plot_waterfall_with_mean(
+    self,
+    idx: int | None = None,
+    model_input: Optional[pd.DataFrame] = None,
+    condition_columns: Optional[List[str]] = None,
+    topk: int = 20,
+    aggregate_others: bool = True,
+    numeric_mean_fmt: str = "{:.3f}",
+    show: bool = False,
+) -> Tuple[pd.DataFrame, go.Figure]:
+    """Plotly 기반 SHAP 워터폴(한 샘플): feature 라벨에 (Avg:μ) 포함,
+    조건 컬럼만 선택/기타 묶기 로직은 기존 구현을 그대로 반영.
+
+    Args:
+        idx: X_test 내 정수 위치 인덱스(라벨 인덱스 아님). None이면 중앙값 예측에 가까운 샘플 선택.
+        model_input: 해석에 사용할 입력 DF. 기본은 self.X_test.
+        condition_columns: 지정 시, 해당 컬럼들만 남기고 나머지는 "(Other Features)"로 합산.
+        topk: 조건 미지정 시, |SHAP| 상위 topk만 남기고 나머지 합산.
+        aggregate_others: True면 나머지 피처를 "(Other Features)"로 묶음.
+        numeric_mean_fmt: 숫자 평균 표기 포맷.
+        show: True면 fig.show() 실행(기본 False).
+
+    Returns:
+        Tuple[pd.DataFrame, plotly.graph_objects.Figure]:
+            df: ['feature','delta','abs_delta','sample_value','dataset_mean','rank','base','prediction','idx']
+            fig: Plotly Waterfall Figure
+    """
+    # 0) 입력/인덱스 확정
+    X = model_input if model_input is not None else self.X_test
+    if X is None or len(X) == 0:
+        raise ValueError("X_test 또는 model_input이 필요합니다.")
+    cols = list(self.columns) if self.columns is not None else list(X.columns)
+
+    # 샘플 선택: idx 없으면 예측 중앙값에 가장 가까운 샘플
+    if idx is None:
+        y_pred_all = np.asarray(self.predict(X))
+        idx = int(np.argsort(y_pred_all)[len(y_pred_all) // 2])
+    if not (0 <= idx < len(X)):
+        raise IndexError("idx가 입력 데이터 범위를 벗어났습니다.")
+
+    # 1) SHAP 값 준비: 저장본 우선, 없으면 지연 계산
+    if getattr(self, "_shap_values_loaded", None) is not None and getattr(self, "_y_pred_test_loaded", None) is not None:
+        shap_vals_all = np.asarray(self._shap_values_loaded)
+        base_value = getattr(self, "_shap_base_value_loaded", None)
+        if base_value is None:
+            # fallback: base ≈ mean(pred - sum(phi))
+            s = shap_vals_all.sum(axis=1)
+            base_value = float(np.mean(self._y_pred_test_loaded - s))
+    else:
+        # 지연 계산
+        if getattr(self, "explainer", None) is None:
+            import shap  # 지연 import
+            self.explainer = shap.Explainer(self.model)
+        exp_all = self.explainer(X)
+        shap_vals_all = np.asarray(exp_all.values)
+        base_raw = exp_all.base_values
+        base_value = float(np.mean(base_raw)) if np.ndim(base_raw) > 0 else float(base_raw)
+
+    # 단일 행 추출
+    phi = shap_vals_all[idx, :]  # (n_features,)
+    x_row = X.iloc[idx, :].values
+
+    # 2) 평균(혹은 최빈)으로 라벨 생성
+    def _avg_label(series: pd.Series) -> str:
+        if pd.api.types.is_numeric_dtype(series):
+            return numeric_mean_fmt.format(float(series.mean()))
+        mode = series.mode(dropna=True)
+        return str(mode.iloc[0]) if len(mode) > 0 else "NA"
+
+    data_mean_map = {c: _avg_label(X[c]) for c in cols}
+    updated_feature_names = [f"(Avg:{data_mean_map[c]}) | {c}" for c in cols]
+
+    # 3) 조건 컬럼만 남기고 나머지 묶기(또는 topk 기준으로 묶기)
+    if condition_columns is not None and len(condition_columns) > 0:
+        cond_set = set(condition_columns)
+        cond_idx = [i for i, c in enumerate(cols) if c in cond_set]
+        other_idx = [i for i in range(len(cols)) if i not in cond_set]
+    else:
+        order = np.argsort(np.abs(phi))[::-1]
+        keep_idx = list(order[: max(1, topk)])
+        other_idx = [i for i in range(len(cols)) if i not in keep_idx]
+        cond_idx = keep_idx
+
+    values_keep = phi[cond_idx].astype(float)
+    data_keep = x_row[cond_idx]
+    names_keep = [updated_feature_names[i] for i in cond_idx]
+
+    # other 부분(합산/평균)
+    values, data, names = list(values_keep), list(data_keep), list(names_keep)
+    if aggregate_others and len(other_idx) > 0:
+        other_sum = float(np.sum(phi[other_idx]))
+        other_series = X.iloc[:, other_idx]
+        if all(pd.api.types.is_numeric_dtype(other_series[c]) for c in other_series.columns):
+            other_data_scalar = float(np.mean(other_series.iloc[idx, :]))
+            other_avg_label = numeric_mean_fmt.format(float(other_series.values.mean()))
+        else:
+            flat_s = pd.Series(other_series.iloc[idx, :])
+            mode_all = flat_s.mode(dropna=True)
+            other_data_scalar = str(mode_all.iloc[0]) if len(mode_all) > 0 else "NA"
+            other_avg_label = "mixed"
+
+        values.append(other_sum)
+        data.append(other_data_scalar)
+        names.append(f"(Avg:{other_avg_label}) | (Other Features)")
+
+    # 4) DF 구성
+    base = float(base_value)
+    pred = base + float(np.sum(values))
+    abs_d = np.abs(values)
+    ranks = list(np.argsort(abs_d)[::-1] + 1)
+
+    df = pd.DataFrame({
+        "feature": names,
+        "delta": values,
+        "abs_delta": abs_d,
+        "sample_value": data,
+        "dataset_mean": [x.split(" | ")[0].replace("(Avg:", "").replace(")", "") if " | " in x else "" for x in names],
+        "rank": ranks,
+    })
+    df["base"] = base
+    df["prediction"] = pred
+    df["idx"] = idx
+
+    # 5) Plotly Waterfall 구성
+    def _fmt(v: Any) -> str:
+        return numeric_mean_fmt.format(float(v)) if isinstance(v, (int, float, np.floating)) else str(v)
+
+    x_labels = ["base"] + names + ["prediction"]
+    measure = ["absolute"] + ["relative"] * len(names) + ["total"]
+    y_vals = [base] + values + [None]  # total은 Plotly가 자동 계산
+
+    texts = ["base"]
+    # name 라벨에는 이미 (Avg:μ) | feature 포함 → 텍스트에는 샘플값/Δ만 보강
+    for name_i, v_i, d_i in zip(names, data, values):
+        # 이름에서 (Avg:μ) 추출
+        mu_disp = name_i.split(" | ")[0].replace("(Avg:", "").replace(")", "")
+        feat_disp = name_i.split(" | ")[1] if " | " in name_i else name_i
+        texts.append(f"{feat_disp}<br>μ={mu_disp} | v={_fmt(v_i)} | Δ={d_i:+.4g}")
+    texts.append(f"prediction={pred:.4g}")
+
+    fig = go.Figure(go.Waterfall(
+        x=x_labels,
+        measure=measure,
+        y=y_vals,
+        text=texts,
+        textposition="outside",
+    ))
+    fig.update_layout(
+        title=f"[{getattr(self, 'model_name', 'Model')}] SHAP Waterfall (idx={idx}, "
+              f"{'cond' if (condition_columns and len(condition_columns)>0) else f'top{topk}'})",
+        xaxis_title="",
+        yaxis_title="Contribution",
+        template="plotly_white",
+        margin=dict(l=40, r=20, t=70, b=40),
+        showlegend=False,
+    )
+
+    if show:
+        fig.show()
+
+    return df, fig
+
+    
     
     def shap_importance_df(self, topk: Optional[int] = 30) -> Optional[pd.DataFrame]:
         """Return mean|SHAP| importance DataFrame on X_test (topk)."""
