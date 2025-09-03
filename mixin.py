@@ -461,6 +461,199 @@ class CatBoostRunner(ResultProtocolMixin):
         return pd.DataFrame([row])
 
     # ---------- SHAP & Feature Importance ----------
+    # --- runner.py (v3에 아래 메서드들 추가) ---
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+# 1) 내부 유틸: SHAP 값 확보(로드본 우선, 없으면 지연계산)
+def _ensure_shap_values(self) -> tuple[np.ndarray, float]:
+    """(shap_values, base_value)를 반환. 저장본 없으면 X_test로 지연계산."""
+    # 저장본 우선
+    if getattr(self, "_shap_values_loaded", None) is not None:
+        shap_vals = np.asarray(self._shap_values_loaded)
+        base = getattr(self, "_shap_base_value_loaded", None)
+        if base is None:
+            # fallback: 평균 base 추정
+            if self.X_test is not None:
+                pred = np.asarray(self._y_pred_test_loaded) if getattr(self, "_y_pred_test_loaded", None) is not None \
+                       else np.asarray(self.predict(self.X_test))
+                s = shap_vals.sum(axis=1)
+                base = float(np.nanmean(pred - s))
+            else:
+                base = 0.0
+        return shap_vals, float(base)
+
+    # 지연계산
+    if self.explainer is None:
+        try:
+            self.explainer = shap.Explainer(self.model)
+        except Exception:
+            raise RuntimeError("SHAP explainer를 초기화할 수 없습니다.")
+    if self.X_test is None:
+        raise ValueError("X_test가 없어 SHAP 값을 계산할 수 없습니다.")
+    exp = self.explainer(self.X_test)
+    shap_vals = np.asarray(exp.values)
+    base = exp.base_values
+    base = float(np.mean(base)) if np.ndim(base) > 0 else float(base)
+
+    # 캐시
+    self._shap_values_loaded = shap_vals
+    self._shap_base_value_loaded = base
+    return shap_vals, base
+
+# 2) Top-k SHAP 요약 바 차트(+ DF 반환)
+def shap_summary_bar(self, topk: int = 20) -> tuple[pd.DataFrame, go.Figure]:
+    """Top-k mean|SHAP| 요약 (DF + Plotly Figure)."""
+    shap_vals, _ = self._ensure_shap_values()
+    if self.columns is None:
+        cols = [f"f{i}" for i in range(shap_vals.shape[1])]
+    else:
+        cols = list(self.columns)
+    imp = np.abs(shap_vals).mean(axis=0)
+    df = pd.DataFrame({"feature": cols, "mean_abs_shap": imp}).sort_values("mean_abs_shap", ascending=False)
+    df = df.head(topk).reset_index(drop=True)
+
+    fig = go.Figure(go.Bar(
+        x=df["mean_abs_shap"][::-1],
+        y=df["feature"][::-1],
+        orientation="h",
+        text=[f"{v:.4g}" for v in df["mean_abs_shap"][::-1]],
+        textposition="outside"
+    ))
+    fig.update_layout(
+        title=f"[{self.model_name}] SHAP Importance (Top {topk})",
+        xaxis_title="Mean |SHAP|",
+        yaxis_title="Feature",
+        template="plotly_white",
+        margin=dict(l=140, r=20, t=60, b=40),
+    )
+    return df, fig
+
+# 3) 워터폴 플롯: 단일 샘플의 기여도 + (값, μ) 라벨
+def shap_waterfall(self,
+                   index: Optional[int] = None,
+                   pick: str = "median_pred",
+                   topk: int = 20,
+                   title: Optional[str] = None) -> go.Figure:
+    """단일 관측치 워터폴(상위 기여 topk) + 각 피처 '값(v), 평균(μ)' 라벨.
+
+    Args:
+        index: X_test의 정수 위치 인덱스(라벨 인덱스 아님). None이면 pick 전략 사용.
+        pick: 'median_pred' | 'min_resid' | 'max_resid'
+        topk: 상위 기여 피처 수
+        title: 플롯 제목
+    """
+    if self.X_test is None or self.y_test is None:
+        raise ValueError("X_test / y_test가 필요합니다.")
+    shap_vals, base = self._ensure_shap_values()
+
+    X = self.X_test
+    y = self.y_test
+    y_pred = (np.asarray(self._y_pred_test_loaded) if getattr(self, "_y_pred_test_loaded", None) is not None
+              else np.asarray(self.predict(X)))
+    resid = y.values - y_pred
+
+    # 샘플 선택
+    if index is None:
+        if pick == "median_pred":
+            idx = int(np.argsort(y_pred)[len(y_pred)//2])
+        elif pick == "min_resid":
+            idx = int(np.argmin(np.abs(resid)))
+        elif pick == "max_resid":
+            idx = int(np.argmax(np.abs(resid)))
+        else:
+            idx = 0
+    else:
+        idx = int(index)
+        if not (0 <= idx < len(X)):
+            raise IndexError("index가 X_test 범위를 벗어났습니다.")
+
+    # 대상 행의 shap 기여 가져오기
+    phi = shap_vals[idx, :]  # (n_features,)
+    if self.columns is None:
+        feats = np.array([f"f{i}" for i in range(phi.shape[0])])
+    else:
+        feats = np.array(list(self.columns))
+
+    # 상위 |기여| topk 선택
+    order = np.argsort(np.abs(phi))[::-1][:topk]
+    feats_k = feats[order]
+    phi_k = phi[order]
+
+    # 관측값 v, 평균 μ 계산(숫자는 mean, 범주는 최빈값 표기)
+    mu_texts = []
+    val_texts = []
+    for f in feats_k:
+        s = X[f]
+        if pd.api.types.is_numeric_dtype(s):
+            mu = float(s.mean())
+            v = float(s.iloc[idx])
+            mu_texts.append(f"μ={mu:.4g}")
+            val_texts.append(f"v={v:.4g}")
+        else:
+            mu = s.mode(dropna=True)
+            mu_str = str(mu.iloc[0]) if len(mu) > 0 else "NA"
+            v_str = str(s.iloc[idx])
+            mu_texts.append(f"μ={mu_str}")
+            val_texts.append(f"v={v_str}")
+
+    # 워터폴 누적: base → base+Σphi_k
+    contrib = phi_k
+    cum = [base]
+    for c in contrib:
+        cum.append(cum[-1] + c)
+    start_vals = cum[:-1]
+    end_vals = cum[1:]
+    deltas = end_vals - np.array(start_vals)
+
+    # 막대 생성
+    colors = ["#1f77b4" if d >= 0 else "#d62728" for d in deltas]
+    texts = [f"{feats_k[i]}<br>{val_texts[i]} | {mu_texts[i]}<br>Δ={deltas[i]:.4g}"
+             for i in range(len(deltas))]
+
+    fig = go.Figure()
+    # base
+    fig.add_trace(go.Bar(
+        x=["base"],
+        y=[base],
+        marker_color="#7f7f7f",
+        text=[f"base={base:.4g}"],
+        textposition="outside",
+        name="base"
+    ))
+    # each feature contribution
+    for i in range(len(deltas)):
+        fig.add_trace(go.Bar(
+            x=[feats_k[i]],
+            y=[deltas[i]],
+            base=start_vals[i],
+            marker_color=colors[i],
+            text=[texts[i]],
+            textposition="outside",
+            name=f"{feats_k[i]}"
+        ))
+    # 최종 예측선
+    final_pred = float(base + phi_k.sum())
+    fig.add_shape(type="line",
+                  x0=-0.5, x1=len(deltas)+0.5,
+                  y0=final_pred, y1=final_pred,
+                  line=dict(color="#2ca02c", dash="dot"))
+    fig.add_annotation(x=len(deltas)/2, y=final_pred,
+                       text=f"prediction={final_pred:.4g}",
+                       showarrow=False, yshift=8)
+
+    fig.update_layout(
+        title=title or f"[{self.model_name}] SHAP Waterfall (idx={idx}, top{topk})",
+        xaxis_title="Feature",
+        yaxis_title="Contribution (cumulative)",
+        template="plotly_white",
+        barmode="stack",
+        showlegend=False,
+        margin=dict(l=40, r=20, t=70, b=40)
+    )
+    return fig
+    
     def shap_importance_df(self, topk: Optional[int] = 30) -> Optional[pd.DataFrame]:
         """Return mean|SHAP| importance DataFrame on X_test (topk)."""
         if self.explainer is None or self.X_test is None:
