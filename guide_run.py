@@ -387,6 +387,178 @@ def build_then_run(
     }
 
 
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+import pandas as pd
+import numpy as np
+
+
+def save_optimization_report_csv(
+    out: Dict[str, Any],
+    for_optimal: pd.DataFrame,
+    y: pd.Series,
+    save_path: Path,
+    func1: Callable[[pd.DataFrame], pd.DataFrame],
+    func2: Callable[[pd.DataFrame], pd.DataFrame],
+    important_features: Optional[List[str]] = None,
+) -> Path:
+    """최적화 out 결과를 섹션별 CSV로 저장한다.
+
+    섹션별 구성(bo_cat → bo_tab → ga_cat → ga_tab):
+      - [헤더] 한 줄
+      - core 표: ['idx','prdt','before_optim','after_optim']
+      - 빈 줄 1개
+      - func1(core 표) 결과(DataFrame)
+      - 빈 줄 1개
+      - func2(core 표) 결과(DataFrame)
+      - 빈 줄 1개
+      - 최적값 vs 데이터 통계 표(min/mean/max/optimal)
+      - 섹션 간 빈 줄 1개
+    """
+    # --- 내부 헬퍼 ---
+    def _predict(model: Any, X: pd.DataFrame) -> np.ndarray:
+        yhat = model.predict(X)
+        return np.asarray(yhat).ravel()
+
+    def _coerce_optimal_input(
+        optimal_input: Any, feature_names: List[str], pref_feats: Optional[List[str]]
+    ) -> Mapping[str, float]:
+        # dict → 교집합, sequence → (pref_feats or feature_names) 순서로 매핑
+        if isinstance(optimal_input, Mapping):
+            return {k: float(v) for k, v in optimal_input.items() if k in feature_names}
+        if isinstance(optimal_input, Sequence) and not isinstance(optimal_input, (str, bytes)):
+            seq = list(optimal_input)
+            names = [c for c in (pref_feats or feature_names) if c in feature_names][: len(seq)]
+            return {n: float(v) for n, v in zip(names, seq)}
+        return {}
+
+    def _apply_after(X: pd.DataFrame, ov_map: Mapping[str, float]) -> pd.DataFrame:
+        if not ov_map:
+            return X.copy()
+        X2 = X.copy()
+        for k, v in ov_map.items():
+            if k in X2.columns:
+                X2[k] = v
+        return X2
+
+    def _blank_row_like(cols: List[str]) -> pd.DataFrame:
+        return pd.DataFrame([{c: "" for c in cols}])
+
+    def _get_reference_X(model_obj: Any, fallback_df: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
+        """모델 내부 X_train/X_test → artifacts df → for_optimal 순으로 참조셋 선택."""
+        for attr in ("X_train", "X_test"):
+            Xc = getattr(model_obj, attr, None)
+            if isinstance(Xc, pd.DataFrame) and len(Xc) > 0:
+                return Xc[feature_names].copy()
+        # artifacts df가 있으면 사용(아래에서 주입)
+        return fallback_df[feature_names].copy()
+
+    def _optimal_vs_data_stats(
+        ov_map: Mapping[str, float],
+        ref_X: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """최적값과 데이터 통계(min/mean/max) 비교 표를 만든다."""
+        if not ov_map:
+            return pd.DataFrame({"info": ["no optimal_input provided"]})
+        cols = [c for c in ov_map.keys() if c in ref_X.columns]
+        if not cols:
+            return pd.DataFrame({"info": ["no matching features in reference data"]})
+        stats = pd.DataFrame(
+            {
+                "min": ref_X[cols].min().astype(float),
+                "mean": ref_X[cols].mean().astype(float),
+                "max": ref_X[cols].max().astype(float),
+            }
+        ).T  # rows=min/mean/max, cols=features
+        optimal_row = pd.DataFrame([ov_map], index=["optimal"])[cols].astype(float)
+        return pd.concat([stats, optimal_row], axis=0)
+
+    # --- 아티팩트 꺼내기 ---
+    artifacts: Dict[str, Any] = out.get("artifacts", {})
+    cat_model = artifacts.get("cat_model_obj", None)
+    tab_model = artifacts.get("tabpfn_model_obj", None)
+    feature_names: List[str] = artifacts.get("feature_names", list(for_optimal.columns))
+    # 참조 df 우선순위: (artifacts["df"]가 있으면 사용) → for_optimal
+    artifacts_df = artifacts.get("df", for_optimal)
+
+    # 예측 기본 입력/정답
+    X_base = for_optimal[feature_names].copy()
+    prdt = np.asarray(y).ravel()
+
+    # 섹션 정의
+    sections = [
+        ("bo_cat", cat_model),
+        ("bo_tab", tab_model),
+        ("ga_cat", cat_model),
+        ("ga_tab", tab_model),
+    ]
+
+    # 누적 블록
+    blocks: List[pd.DataFrame] = []
+
+    for key, model in sections:
+        res = out.get("results", {}).get(key, None)
+        if res is None or model is None:
+            continue
+
+        best_x = res[0]
+        y_before = _predict(model, X_base)
+
+        ov = _coerce_optimal_input(best_x, feature_names, important_features)
+        X_after = _apply_after(X_base, ov)
+        y_after = _predict(model, X_after)
+
+        # 헤더
+        head = pd.DataFrame({"section": [f"[SECTION] {key}"]})
+
+        # 코어 표
+        core_df = pd.DataFrame(
+            {
+                "idx": for_optimal.index,
+                "prdt": prdt,
+                "before_optim": y_before,
+                "after_optim": y_after,
+            }
+        )
+
+        # func1/func2
+        f1 = func1(core_df[["prdt", "before_optim", "after_optim"]])
+        f2 = func2(core_df[["prdt", "before_optim", "after_optim"]])
+
+        # 참조 데이터 선택(모델 내부 X_train/X_test → artifacts df → for_optimal)https://github.com/yc-jang/pv_repo/pull/10
+        ref_X = _get_reference_X(model, artifacts_df, feature_names)
+        stats_df = _optimal_vs_data_stats(ov, ref_X)
+        # 사람이 보기 좋게 행 인덱스 표시 컬럼 추가
+        stats_df = stats_df.reset_index().rename(columns={"index": "stat"})
+
+        # 이어붙이기
+        blocks.extend(
+            [
+                head,
+                core_df,
+                _blank_row_like(core_df.columns.tolist()),
+                f1,
+                _blank_row_like(f1.columns.tolist()),
+                f2,
+                _blank_row_like(f2.columns.tolist()),
+                stats_df,
+                pd.DataFrame([{"": ""}]),  # 섹션 구분 빈 줄
+            ]
+        )
+
+    save_path = Path(save_path).resolve()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not blocks:
+        pd.DataFrame([{"info": "no active results to save"}]).to_csv(save_path, index=False)
+        return save_path
+
+    pd.concat(blocks, ignore_index=True).to_csv(save_path, index=False)
+    return save_path
+
 # ============================== 사용 예시 ==============================
 # base = Path(__file__).resolve().parent
 # build_cfg = BuildConfig(
