@@ -93,3 +93,122 @@ def _collect_pareto(res, problem: "BatchMultiObjectiveProblem") -> pd.DataFrame:
         return pd.DataFrame()
     df_fb["note"] = "least_infeasible"
     return df_fb
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+
+def _pick_decision_from_pareto(pareto_df: pd.DataFrame, important_features: List[str]) -> Dict[str, float]:
+    """pareto_df(1행)에서 x::feat → 의사결정변수 dict로 변환."""
+    row = pareto_df.iloc[0]
+    dec: Dict[str, float] = {}
+    for f in important_features:
+        col = f"x::{f}"
+        if col in row.index:
+            dec[f] = float(row[col])
+    return dec
+
+
+def _apply_decision(for_optimal: pd.DataFrame, decision: Dict[str, float], feature_names: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """결정변수 적용 전/후 입력 X를 반환."""
+    X_before = for_optimal[feature_names].copy()
+    X_after = X_before.copy()
+    for k, v in decision.items():
+        if k in X_after.columns:
+            X_after[k] = v  # 전 행 동일 적용
+    return X_before, X_after
+
+
+def _predict_all(models: Dict[str, Any], X: pd.DataFrame, feature_names: List[str]) -> Dict[str, np.ndarray]:
+    """타깃별 예측."""
+    preds: Dict[str, np.ndarray] = {}
+    for t, model in models.items():
+        y = model.predict(X[feature_names])
+        preds[t] = np.asarray(y, dtype=float).ravel()
+    return preds
+
+
+def export_mo_report_csv(
+    *,
+    out_mo: Dict[str, Any],
+    for_optimal: pd.DataFrame,
+    models: Dict[str, Any],
+    feature_names: List[str],
+    important_features: List[str],
+    spec_map_keys: List[str],                  # 예: ["Discharge","Pressure",...]
+    y_true_map: Dict[str, pd.Series],          # 타깃별 y_test (for_optimal 인덱스와 일치)
+    save_path: Path,
+) -> Path:
+    """MO 최종 해를 적용하여 타깃별 전/후 예측과 실측을 CSV로 저장.
+
+    결과 컬럼:
+      - idx, target
+      - y_true, y_pred_before, y_pred_after, delta_after(=after - y_true)
+      - mae_before, mae_after
+      - (선택) 결정변수 스냅샷: x::<feat> 컬럼들(맨 앞 1행만; 참고용)
+    """
+    logger.info("Preparing multi-objective report CSV...")
+
+    # 1) 최종 해(한 행) 가져오기
+    mo_res = out_mo["results"]["mo_cat"]  # 필요시 키 변경
+    pareto_df: pd.DataFrame = mo_res.pareto_df
+    assert len(pareto_df) == 1, "pareto_df는 최종 1행이어야 합니다."
+
+    decision = _pick_decision_from_pareto(pareto_df, important_features)
+    logger.info(f"Chosen decision (|V|={len(decision)}): {decision}")
+
+    # 2) 전/후 입력 구성
+    X_before, X_after = _apply_decision(for_optimal, decision, feature_names)
+
+    # 3) 타깃별 예측
+    pred_before = _predict_all(models, X_before, feature_names)
+    pred_after  = _predict_all(models,  X_after,  feature_names)
+
+    # 4) 타깃별 행결합 리포트
+    frames: List[pd.DataFrame] = []
+    for t in spec_map_keys:
+        if t not in models:
+            continue
+        y_true = y_true_map[t].reindex(for_optimal.index).astype(float)
+        y_bef  = pred_before[t]
+        y_aft  = pred_after[t]
+
+        df_t = pd.DataFrame({
+            "idx": for_optimal.index,
+            "target": t,
+            "y_true": y_true.to_numpy(),
+            "y_pred_before": y_bef,
+            "y_pred_after":  y_aft,
+        })
+        # 오차 요약(행 단위)
+        df_t["delta_after"] = df_t["y_pred_after"] - df_t["y_true"]
+        df_t["mae_before"]  = np.abs(df_t["y_pred_before"] - df_t["y_true"])
+        df_t["mae_after"]   = np.abs(df_t["y_pred_after"]  - df_t["y_true"])
+        frames.append(df_t)
+
+    report = pd.concat(frames, axis=0, ignore_index=True)
+
+    # 5) 결정변수 스냅샷(참고): x::feat 컬럼을 맨 앞 블록으로 별도 섹션처럼 덧붙임
+    #    - 데이터 분석 편의를 위해 1행만 기록(선택)
+    x_cols = [f"x::{f}" for f in important_features]
+    x_row = {f"x::{k}": v for k, v in decision.items()}
+    x_block = pd.DataFrame([x_row], columns=x_cols)
+    sep = pd.DataFrame([{"idx": "", "target": "", "y_true": "", "y_pred_before": "", "y_pred_after": "",
+                         "delta_after": "", "mae_before": "", "mae_after": ""}])
+
+    # 6) 저장 (결정변수 스냅샷 → 빈 줄 → 본문)
+    save_path = Path(save_path).resolve()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(save_path, "w", encoding="utf-8") as f:
+        x_block.to_csv(f, index=False)
+        sep.to_csv(f, index=False, header=False)
+        report.to_csv(f, index=False)
+
+    logger.info(f"Saved MO report → {save_path}")
+    return save_path
