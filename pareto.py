@@ -286,3 +286,54 @@ def _compute_F_real_from_X(models: dict, problem, Xo: np.ndarray) -> np.ndarray:
             F_real[m, k] = mae_real
     return F_real
 
+
+def _collect_pareto(res, problem) -> pd.DataFrame:
+    """
+    res.opt (feasible nondominated set)에서 X를 꺼내,
+    각 솔루션에 대해 '실제 단위' 평균 MAE를 재계산해 f::로 저장한다.
+    - 타깃 순서는 problem.targets에 고정
+    - 모델 접근은 problem.models[t] (러너/모델 혼용 대비)
+    - 배치 입력 생성은 problem._apply_decision(x) (스케일러 포함)
+    """
+    opt = getattr(res, "opt", None)
+    if opt is None:
+        return pd.DataFrame()
+
+    Xo, Fo, Go = opt.get("X"), opt.get("F"), opt.get("G")   # Fo(정규화 목적)는 표시용으로 쓰지 않음
+
+    # --- 실제 단위 F 재계산 ---
+    M = Xo.shape[0]
+    K = len(problem.targets)
+    F_real = np.zeros((M, K), dtype=float)
+
+    for m in range(M):
+        X_df = problem._apply_decision(Xo[m])  # 배치(all) 입력 생성 + (필요시) scaler 적용
+        for k, t in enumerate(problem.targets):  # 순서 고정
+            model_or_runner = problem.models[t]
+            model = getattr(model_or_runner, "model", model_or_runner)  # 러너면 .model, 아니면 그대로
+            yhat = _predict_generic(model, X_df, problem.feature_names)
+            desired = problem.specs[t]["desired"]  # (N,) 벡터
+            F_real[m, k] = float(np.mean(np.abs(yhat - desired)))  # 실제 단위 평균 MAE
+
+    # --- DataFrame 구성 ---
+    x_cols = [f"x::{f}" for f in problem.important_features]
+    f_cols = [f"f::{name}" for name in getattr(problem, "objective_names", problem.targets)]
+
+    dfs = [
+        pd.DataFrame(Xo, columns=x_cols),
+        pd.DataFrame(F_real, columns=f_cols),
+    ]
+
+    if Go is not None and Go.size > 0:
+        g_cols = []
+        for t in problem.targets:
+            sp = problem.specs[t]
+            if sp["lower"] is not None:
+                g_cols.append(f"g::{t}_lower")
+            if sp["upper"] is not None:
+                g_cols.append(f"g::{t}_upper")
+        dfs.append(pd.DataFrame(Go, columns=g_cols))
+
+    df = pd.concat(dfs, axis=1).reset_index(drop=True)
+    return df
+
