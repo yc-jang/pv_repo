@@ -251,3 +251,38 @@ def plot_selected_x_pcp_pymoo(pareto_df: pd.DataFrame, k: int = 6) -> None:
     ax.set_yticklabels([f"{t:.2f}" for t in np.linspace(0, 1, 6)])
     plt.tight_layout()
     plt.show(block=True)
+
+import numpy as np
+import pandas as pd
+
+def _apply_decision_to_base(x: np.ndarray, problem) -> pd.DataFrame:
+    """중요 피처를 x로 고정하여 배치 입력을 구성."""
+    df = problem.batch_base.copy()
+    for j, f in enumerate(problem.important_features):
+        df[f] = x[j]
+    # 필요 시 스케일러 적용 (문제 클래스에 이미 동일 로직이 있다면 그것 사용)
+    if getattr(problem, "scaler", None) is not None:
+        arr = problem.scaler.transform(df[problem.feature_names])
+        df = pd.DataFrame(arr, columns=problem.feature_names, index=problem.batch_base.index)
+    return df
+
+def _predict_generic(model, X: pd.DataFrame, feature_names) -> np.ndarray:
+    """CatBoost/기타 모델 예측 래퍼(당신 코드에 이미 있다면 그것 사용)."""
+    y = model.predict(X[feature_names])
+    return np.asarray(y, dtype=float).reshape(-1)
+
+def _compute_F_real_from_X(models: dict, problem, Xo: np.ndarray) -> np.ndarray:
+    """선택된 해 Xo 각각에 대해, 실제 스케일의 MAE(타깃별 평균 |yhat-desired|) 행렬을 계산."""
+    K = len(problem.targets)
+    M = Xo.shape[0]
+    F_real = np.zeros((M, K), dtype=float)
+
+    for m in range(M):
+        X_df = _apply_decision_to_base(Xo[m], problem)
+        for k, t in enumerate(problem.targets):
+            yhat = _predict_generic(models[t], X_df, problem.feature_names)
+            desired = problem.specs[t]["desired"]    # 길이 N 벡터
+            mae_real = np.abs(yhat - desired).mean() # ← 실제 단위의 평균 MAE
+            F_real[m, k] = mae_real
+    return F_real
+
