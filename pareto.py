@@ -143,3 +143,111 @@ def plot_selected_x_pcp_pymoo(
             p.add(X[hi], linewidth=2.5, color="C2", alpha=0.9)
 
     p.show()
+
+
+# === 기존 헬퍼 그대로 사용 ===
+# _split_cols(df) -> (x_cols, f_cols, g_cols)
+# _knee_indices_by_utopia(df, f_cols, k=3) -> np.ndarray
+# _top_indices_by_sum(df, f_cols, top_n=5) -> np.ndarray
+
+from pymoo.visualization.pcp import PCP
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from typing import List, Tuple
+
+# ------------------ (1) 목적 PCP: 자동 강조(1순위=red, 2순위=blue) ------------------
+def plot_objectives_pcp_pymoo(pareto_df: pd.DataFrame) -> None:
+    """모든 f:: 축을 PCP로 표시.
+    강조 대상은 내부에서 _knee / _top을 이용해 자동 선택:
+      - 1순위: knee[0] (빨강)
+      - 2순위: top[0]  (파랑, 1순위와 중복이면 다음 순번)
+    """
+    _, f_cols, _ = _split_cols(pareto_df)
+    if not f_cols:
+        raise ValueError("f:: 컬럼이 없습니다.")
+
+    F = pareto_df[f_cols].to_numpy(float)
+
+    # 우선순위 인덱스 선정: knee → top
+    knees = _knee_indices_by_utopia(pareto_df, f_cols, k=3)
+    tops  = _top_indices_by_sum(pareto_df, f_cols, top_n=3)
+
+    order: List[int] = []
+    if len(knees) > 0: order.append(int(knees[0]))
+    if len(tops)  > 0:
+        for t in tops:
+            if int(t) not in order:
+                order.append(int(t))
+                break
+    # 보호: 후보 부족 시 0번, 1번으로 보충
+    if not order:
+        order = [0]
+    if len(order) == 1 and len(pareto_df) > 1:
+        order.append(1)
+
+    idx_red  = order[0]
+    idx_blue = order[1] if len(order) > 1 else order[0]
+
+    p = PCP(title="Objectives (PCP) | red=knee[0], blue=top[0]", labels=f_cols)
+    p.add(F, color="lightgray", alpha=0.5, linewidth=1.0)      # 전체
+    p.add(F[[idx_blue]], color="C0", alpha=0.95, linewidth=2.2) # 2순위=blue
+    p.add(F[[idx_red]],  color="C3", alpha=1.0,  linewidth=2.8) # 1순위=red
+    p.show()
+
+    # (선택) 0~1 눈금 표시
+    ax = plt.gca()
+    ax.set_yticks(np.linspace(0, 1, 6))
+    ax.set_yticklabels([f"{t:.2f}" for t in np.linspace(0, 1, 6)])
+    plt.tight_layout()
+    plt.show(block=True)
+
+
+# ------------- (2) 선택 X PCP: 내부 자동 선택 + 동일 강조 규칙 ----------------
+def plot_selected_x_pcp_pymoo(pareto_df: pd.DataFrame, k: int = 6) -> None:
+    """분산 상위 k개의 x:: 축을 내부에서 자동 선택하여 PCP 표시.
+    강조 대상은 Objectives PCP와 동일 규칙(1순위=red, 2순위=blue).
+    """
+    x_cols, f_cols, _ = _split_cols(pareto_df)
+    if not x_cols:
+        raise ValueError("x:: 컬럼이 없습니다.")
+    if not f_cols:
+        raise ValueError("f:: 컬럼이 없습니다.")
+
+    # x 축 자동 선택(분산 상위 k)
+    var = pareto_df[x_cols].var(numeric_only=True).sort_values(ascending=False)
+    sel = var.index.tolist()[: max(1, min(k, len(var)))]
+
+    X = pareto_df[sel].to_numpy(float)
+
+    # 동일한 강조 인덱스 선정
+    knees = _knee_indices_by_utopia(pareto_df, f_cols, k=3)
+    tops  = _top_indices_by_sum(pareto_df, f_cols, top_n=3)
+
+    order: List[int] = []
+    if len(knees) > 0: order.append(int(knees[0]))
+    if len(tops)  > 0:
+        for t in tops:
+            if int(t) not in order:
+                order.append(int(t))
+                break
+    if not order:
+        order = [0]
+    if len(order) == 1 and len(pareto_df) > 1:
+        order.append(1)
+
+    idx_red  = order[0]
+    idx_blue = order[1] if len(order) > 1 else order[0]
+
+    p = PCP(title=f"Selected X (PCP) | red=knee[0], blue=top[0] | k={len(sel)}", labels=sel)
+    p.add(X, color="lightgray", alpha=0.5, linewidth=1.0)       # 전체
+    p.add(X[[idx_blue]], color="C0", alpha=0.95, linewidth=2.2) # 2순위=blue
+    p.add(X[[idx_red]],  color="C3", alpha=1.0,  linewidth=2.8) # 1순위=red
+    p.show()
+
+    # (선택) 0~1 눈금 표시
+    ax = plt.gca()
+    ax.set_yticks(np.linspace(0, 1, 6))
+    ax.set_yticklabels([f"{t:.2f}" for t in np.linspace(0, 1, 6)])
+    plt.tight_layout()
+    plt.show(block=True)
