@@ -337,3 +337,31 @@ def _collect_pareto(res, problem) -> pd.DataFrame:
     df = pd.concat(dfs, axis=1).reset_index(drop=True)
     return df
 
+import numpy as np
+import pandas as pd
+
+def select_best_and_knee(pareto_df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """
+    pareto_df에서 Top-1(초록)과 Knee(빨강) 해를 1개씩 반환한다.
+    f:: 컬럼은 반드시 존재해야 함.
+    반환: (top_row, knee_row)
+    """
+    f_cols = [c for c in pareto_df.columns if c.startswith("f::")]
+    if not f_cols:
+        raise ValueError("pareto_df must contain f:: columns.")
+
+    # --- ① Top 해 (전반적 오차 최소)
+    rank_sum = pareto_df[f_cols].sum(axis=1)
+    idx_top = rank_sum.idxmin()
+    top_row = pareto_df.loc[idx_top]
+
+    # --- ② Knee 해 (trade-off 절충점)
+    F = pareto_df[f_cols].to_numpy(dtype=float)
+    f_min, f_max = F.min(axis=0), F.max(axis=0)
+    denom = np.where(f_max > f_min, f_max - f_min, 1.0)
+    F_norm = (F - f_min) / denom
+    dist = np.linalg.norm(F_norm, axis=1)
+    idx_knee = np.argmin(dist)
+    knee_row = pareto_df.iloc[idx_knee]
+
+    return top_row, knee_row
