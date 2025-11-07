@@ -1,4 +1,51 @@
 from __future__ import annotations
+from typing import Dict, List, Union
+import pandas as pd
+
+
+def find_oos_lots(
+    out: pd.DataFrame,
+    spec: Dict[str, List[Union[str, float, int]]],
+) -> pd.DataFrame:
+    """SPEC(비고별 상/하한) 기준으로 벗어난 LOT만 반환.
+
+    규칙:
+      - spec[key][0] = 상한(upper), spec[key][2] = 하한(lower) (없으면 무시)
+      - 상한/하한 중 존재하는 경계만 검사
+      - 비교는 '초과/미만' (동일값은 정상으로 간주)
+
+    Args:
+        out: merge_op_qual_prdt 결과. 열: 'heat_lot_no','비고','품질검사값' 포함.
+        spec: 비고 → [상한, *, 하한] 형식의 딕셔너리 (문자/숫자 혼재 가능)
+
+    Returns:
+        out-of-spec 행만 담은 DataFrame (열: 'heat_lot_no','비고','품질검사값','하한','상한').
+    """
+    # 1) 비고→상/하한 매핑 사전 생성(결측/비정상 값은 NaN 처리)
+    def _to_num(x):
+        return pd.to_numeric(x, errors="coerce")
+
+    upper_map = {k: _to_num(v[0]) if len(v) > 0 else pd.NA for k, v in spec.items()}
+    lower_map = {k: _to_num(v[2]) if len(v) > 2 else pd.NA for k, v in spec.items()}
+
+    df = out.copy()
+
+    # 2) 경계값 및 측정값 수치화
+    df["상한"] = df["비고"].map(upper_map)
+    df["하한"] = df["비고"].map(lower_map)
+    df["품질검사값_num"] = pd.to_numeric(df["품질검사값"], errors="coerce")
+
+    # 3) out-of-spec 마스크 (존재하는 경계만 검사)
+    mask_upper = df["상한"].notna() & (df["품질검사값_num"] > df["상한"])
+    mask_lower = df["하한"].notna() & (df["품질검사값_num"] < df["하한"])
+    mask = mask_upper | mask_lower
+
+    # 4) 결과 정리(필요 컬럼만, 정렬)
+    res = df.loc[mask, ["heat_lot_no", "비고", "품질검사값", "하한", "상한"]]
+    return res.sort_values(["비고", "heat_lot_no"], kind="stable").reset_index(drop=True)
+
+
+from __future__ import annotations
 from typing import Dict
 import pandas as pd
 
