@@ -3,6 +3,224 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, List
 import pandas as pd
+import plotly.express as px
+
+
+# =========================
+# Small, Focused Utilities
+# =========================
+
+_EXPLICIT_LINE_MAP: Dict[str, int] = {"GI": 9, "GL": 12, "GM": 13}
+
+
+def _ensure_dir(p: Path) -> None:
+    """Create directory if not exists."""
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_filename(text: str) -> str:
+    """Keep filename-safe characters only."""
+    return "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(text))
+
+
+def _to_str_key(s: pd.Series) -> pd.Series:
+    """Normalize key Series to string.
+
+    If numeric → cast to int (drop decimal) → string; else → string as-is.
+    NaN preserved.
+    """
+    if pd.api.types.is_numeric_dtype(s):
+        return s.apply(lambda x: None if pd.isna(x) else str(int(float(x))))
+    return s.astype("string")
+
+
+def _alpha_to_line(ch: str) -> float | int:
+    """Map single alphabet to line number with I=9 baseline."""
+    if isinstance(ch, str) and len(ch) == 1 and ch.isalpha():
+        return ord(ch.upper()) - ord("I") + 9
+    return float("nan")
+
+
+def _infer_line_from_lot(heat_lot_no: pd.Series) -> pd.Series:
+    """Infer line number(Int64) from first two chars of LOT.
+
+    Rules:
+      1) Explicit map first: GI→9, GL→12, GM→13
+      2) For 'G?' pattern not mapped, use second letter with I=9 baseline
+      3) Otherwise NaN
+    """
+    s = heat_lot_no.astype("string").str.upper()
+    first2 = s.str[:2]
+    explicit = first2.map(_EXPLICIT_LINE_MAP)
+    need_est = explicit.isna() & s.str.startswith("G")
+    second = s.str[1]
+    est = second.where(need_est).map(_alpha_to_line)
+    return explicit.fillna(est).astype("Int64")
+
+
+def _prdt_to_long(prdt: pd.DataFrame, need_cols: Iterable[str]) -> pd.DataFrame:
+    """Convert PRDT wide → long with needed columns only."""
+    cols: List[str] = [c for c in pd.unique(pd.Series(list(need_cols))) if c in prdt.columns]
+    if not cols:
+        return pd.DataFrame(columns=["입고LOT", "prdt_col", "품질검사값"])
+    # 와이드 → 롱 변환
+    return prdt.melt(
+        id_vars=["입고LOT"],
+        value_vars=cols,
+        var_name="prdt_col",
+        value_name="품질검사값",
+    )
+
+
+def _melt_for_plot(df: pd.DataFrame) -> pd.DataFrame:
+    """Wide → long for plotting three metrics into single 'value' column."""
+    value_cols = ["품질검사값", "최적화전품질값", "최적화후품질값"]
+    present = [c for c in value_cols if c in df.columns]
+    return df.melt(
+        id_vars=["heat_lot_no", "라인", "비고"],
+        value_vars=present,
+        var_name="metric",
+        value_name="value",
+    )
+
+
+def _plot_single_group(melted: pd.DataFrame, title: str) -> "px.Figure":
+    """Build per-remark line chart."""
+    # 핵심 로직: LOT 발생 순서를 카테고리 순서로 사용
+    order = pd.unique(melted["heat_lot_no"])
+    fig = px.line(
+        melted.sort_values("heat_lot_no", kind="stable"),
+        x="heat_lot_no", y="value", color="metric",
+        markers=True,
+        category_orders={"heat_lot_no": list(order)},
+        title=title,
+    )
+    fig.update_layout(
+        xaxis_title="heat_lot_no",
+        yaxis_title="Value",
+        legend_title="Metric",
+        hovermode="x unified",
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+    return fig
+
+
+# =========================
+# Public API
+# =========================
+
+def merge_op_qual_prdt(
+    op_qual_path: str | Path,
+    prdt_path: str | Path,
+    col_map: Dict[str, str],
+) -> pd.DataFrame:
+    """Merge OP_QUAL(xlsx) and PRDT(csv) on LOT and add inferred '라인'.
+
+    Pipeline:
+      (1) Load files
+      (2) Normalize keys to string
+      (3) Map OP_QUAL['비고'] to PRDT columns via `col_map`
+      (4) Convert PRDT wide→long for needed columns
+      (5) Merge on (heat_lot_no, prdt_col)
+      (6) Select final columns and compute '라인'
+
+    Args:
+        op_qual_path: Absolute path to OP_QUAL Excel.
+        prdt_path: Absolute path to PRDT CSV (assume utf-8-sig).
+        col_map: Mapping from OP_QUAL '비고' to PRDT column names.
+
+    Returns:
+        DataFrame with columns:
+        ['heat_lot_no','라인','비고','품질검사값','최적화전품질값','최적화후품질값']
+    """
+    # (1) Load
+    op = pd.read_excel(op_qual_path)
+    pr = pd.read_csv(prdt_path, encoding="utf-8-sig")
+
+    # (2) Normalize keys
+    op = op.copy(); pr = pr.copy()
+    op["heat_lot_no"] = _to_str_key(op["heat_lot_no"])
+    pr["입고LOT"] = _to_str_key(pr["입고LOT"])
+
+    # (3) Map remark → PRDT column
+    op["prdt_col"] = op["비고"].map(col_map)
+
+    # (4) PRDT long
+    pr_long = _prdt_to_long(pr, need_cols=op["prdt_col"].dropna())
+
+    # (5) Merge on (heat_lot_no, prdt_col)
+    merged = op.merge(
+        pr_long,
+        left_on=["heat_lot_no", "prdt_col"],
+        right_on=["입고LOT", "prdt_col"],
+        how="left",
+    )
+
+    # (6) Final columns + '라인'
+    out = merged[["heat_lot_no", "비고", "품질검사값", "최적화전품질값", "최적화후품질값"]].copy()
+    out.insert(1, "라인", _infer_line_from_lot(out["heat_lot_no"]))
+    out = out.sort_values(["heat_lot_no", "비고"], kind="stable").reset_index(drop=True)
+    return out
+
+
+def export_quality_plots(
+    out_df: pd.DataFrame,
+    by_line: bool = True,
+    output_dir: str | Path = ".",
+    width: int = 1280,
+    height: int = 720,
+    scale: int = 2,
+) -> None:
+    """Export per-remark Plotly charts as PNG images.
+
+    If `by_line=True`, saves into subfolders per line (e.g., ./라인_9/).
+    If `by_line=False`, saves into `output_dir` for entire dataset.
+
+    Args:
+        out_df: The DataFrame returned by `merge_op_qual_prdt`.
+        by_line: Save per line subfolders if True; otherwise save as total.
+        output_dir: Root directory to save results (default ".").
+        width: Image width in px (default 1280).
+        height: Image height in px (default 720).
+        scale: Image scaling factor for write_image (default 2).
+
+    Notes:
+        - PNG export requires Plotly's static image engine (e.g., kaleido).
+    """
+    df = out_df.copy()
+    base_dir = Path(output_dir).resolve()
+    _ensure_dir(base_dir)
+
+    melted = _melt_for_plot(df)
+    if melted.empty:
+        return
+
+    if by_line:
+        for line, g_line in melted.groupby("라인", dropna=False):
+            line_label = "NaN" if pd.isna(line) else str(int(line))
+            line_dir = base_dir / f"라인_{_safe_filename(line_label)}"
+            _ensure_dir(line_dir)
+
+            for remark, g in g_line.groupby("비고", dropna=False):
+                remark_label = "NaN" if pd.isna(remark) else str(remark)
+                title = f"[라인 {line_label}] 비고: {remark_label}"
+                fig = _plot_single_group(g, title)
+                fname = f"line_{line_label}__remark_{_safe_filename(remark_label)}.png"
+                fig.write_image(str(line_dir / fname), width=width, height=height, scale=scale)
+    else:
+        for remark, g in melted.groupby("비고", dropna=False):
+            remark_label = "NaN" if pd.isna(remark) else str(remark)
+            title = f"[전체 데이터] 비고: {remark_label}"
+            fig = _plot_single_group(g, title)
+            fname = f"total__remark_{_safe_filename(remark_label)}.png"
+            fig.write_image(str(base_dir / fname), width=width, height=height, scale=scale)
+
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Iterable, List
+import pandas as pd
 
 
 # ==== Types & Constants ====
