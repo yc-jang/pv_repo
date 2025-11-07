@@ -1,4 +1,40 @@
 from __future__ import annotations
+from typing import Dict
+import pandas as pd
+
+
+def find_oos_lots(out: pd.DataFrame, spec: Dict[str, list[str]]) -> pd.DataFrame:
+    """SPEC 기준(비고별 상·하한)으로 out-of-spec LOT 목록을 반환한다.
+
+    SPEC 형식:
+      - key: out['비고'] 값
+      - value: list[str]이며 value[0] = 상한, value[2] = 하한 (문자 가능)
+
+    Args:
+        out: merge_op_qual_prdt 결과 DataFrame. 열: 'heat_lot_no','비고','품질검사값' 포함.
+        spec: 비고 → [상한, *, 하한] 형태의 사전.
+
+    Returns:
+        벗어난 LOT들만 담은 DataFrame (열: 'heat_lot_no','비고','품질검사값','하한','상한').
+    """
+    # SPEC → DataFrame (비고 인덱스, 상/하한 숫자화)
+    spec_df = pd.DataFrame.from_dict(spec, orient="index").rename(columns={0: "상한", 2: "하한"})[["상한", "하한"]]
+    spec_df["상한"] = pd.to_numeric(spec_df["상한"], errors="coerce")
+    spec_df["하한"] = pd.to_numeric(spec_df["하한"], errors="coerce")
+
+    # out ←→ SPEC 조인 및 숫자 변환
+    merged = out.merge(spec_df, left_on="비고", right_index=True, how="left").copy()
+    merged["품질검사값_num"] = pd.to_numeric(merged["품질검사값"], errors="coerce")
+
+    # 벗어남 조건: 값 > 상한 or 값 < 하한
+    mask = (merged["품질검사값_num"] > merged["상한"]) | (merged["품질검사값_num"] < merged["하한"])
+
+    # 결과 정리
+    cols = ["heat_lot_no", "비고", "품질검사값", "하한", "상한"]
+    return merged.loc[mask, cols].sort_values(["비고", "heat_lot_no"], kind="stable").reset_index(drop=True)
+
+
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Iterable, List
