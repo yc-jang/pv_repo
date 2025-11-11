@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Dict, List, Tuple, Sequence, Optional
-import re
 import numpy as np
 import pandas as pd
 
@@ -10,16 +9,9 @@ import pandas as pd
 # =========================
 
 def _extract_numeric_series(s: pd.Series) -> pd.Series:
-    """문자 섞인 수치(예: '<0.01', 'ND', '0.45%')에서도 숫자만 안전 추출.
-
-    Google style:
-        Args:
-            s: 임의의 dtype Series.
-
-        Returns:
-            float Series (추출 불가 시 NaN).
+    """문자 섞인 수치에서도 숫자만 안전 추출(예: '<0.01','ND','0.45%').
+    - 핵심 원리: 정규식으로 부호/소수 포함 숫자 패턴만 추출 → float 변환
     """
-    # 핵심 원리: 정규식으로 부호/소수 포함 숫자 패턴만 추출 후 float 변환
     return (
         s.astype(str)
          .str.extract(r"([-+]?\d*\.?\d+)", expand=False)
@@ -28,11 +20,7 @@ def _extract_numeric_series(s: pd.Series) -> pd.Series:
 
 
 def _parse_spec_item(item: Sequence) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """spec의 [low, desired, upper]를 숫자 튜플로 변환.
-
-    Note:
-        - 없는 값은 None으로 처리.
-    """
+    """spec의 [low, desired, upper] → (low, desired, upper) 숫자 튜플."""
     def _to_num(x):
         if x is None:
             return None
@@ -46,7 +34,7 @@ def _parse_spec_item(item: Sequence) -> Tuple[Optional[float], Optional[float], 
 
 
 def _spec_width(low: Optional[float], upper: Optional[float]) -> Optional[float]:
-    """스펙폭(U-L) 계산. 하나라도 없거나 U<L이면 None."""
+    """스펙폭(U-L). 하나라도 없거나 U<L이면 None."""
     if (low is None) or (upper is None):
         return None
     if upper < low:
@@ -55,7 +43,7 @@ def _spec_width(low: Optional[float], upper: Optional[float]) -> Optional[float]
 
 
 # =========================
-# 지표 계산 함수 (각 비고 그룹 단위)
+# 지표 계산 함수 (비고 그룹 단위)
 # =========================
 
 def _central_proximity_stats(
@@ -67,55 +55,44 @@ def _central_proximity_stats(
 ) -> dict:
     """중심 접근도: desired 대비 평균 편차의 절대값 감소율.
 
-    원리:
-        - 평균이 desired에 가까워질수록 좋음.
-        - 다른 항목과의 비교 가능성을 위해 스펙폭으로 정규화(가능한 경우).
-
-    Returns:
-        {
-            'mean_diff_before', 'mean_diff_after',        # 비정규화 평균편차
-            'mean_dev_before_norm', 'mean_dev_after_norm',# 정규화 절대편차
-            'mean_gain'                                   # 개선율(+ 좋음)
-        }
+    정의(정규화된 절대편차):
+      dev_b = |mean(before) - desired| / scale
+      dev_a = |mean(after)  - desired| / scale
+      scale = (U-L) if 가능, 아니면 결합 표준편차로 대체
+    개선비율(gain):
+      mean_gain = (dev_b - dev_a) / (dev_b + eps)
+      → before를 기준으로 after가 얼마나 **비율로** 개선되었는지 (+면 개선, -면 악화)
     """
-    # 핵심 원리: 원자료를 우선 숫자화
     b = _extract_numeric_series(before).to_numpy(dtype=float)
     a = _extract_numeric_series(after).to_numpy(dtype=float)
 
-    # desired 필요 (없으면 NaN 반환)
     if desired is None or np.isnan(desired):
         return dict(
-            mean_diff_before=np.nan, mean_diff_after=np.nan,
-            mean_dev_before_norm=np.nan, mean_dev_after_norm=np.nan,
-            mean_gain=np.nan,
+            mean_편차_전=np.nan, mean_편차_후=np.nan,
+            평균목표편차_전_정규화=np.nan, 평균목표편차_후_정규화=np.nan,
+            평균목표접근개선율=np.nan,
         )
 
-    # 평균 편차(비정규화)
-    diff_b = np.nanmean(b) - desired
-    diff_a = np.nanmean(a) - desired
+    diff_b = float(np.nanmean(b) - desired)
+    diff_a = float(np.nanmean(a) - desired)
 
-    # 절대편차 정규화: spec_w 있으면 /spec_w, 없으면 표준편차 대안
     if spec_w is not None and spec_w > 0:
         dev_b = abs(diff_b) / spec_w
         dev_a = abs(diff_a) / spec_w
     else:
-        # 대안: 표준편차(전/후 합본)로 나눔 → 데이터 스케일 정규화
         pooled = np.concatenate([b[~np.isnan(b)], a[~np.isnan(a)]])
-        sd = np.nanstd(pooled, ddof=1)
-        if sd == 0 or np.isnan(sd):
-            dev_b, dev_a = abs(diff_b), abs(diff_a)
-        else:
-            dev_b, dev_a = abs(diff_b) / sd, abs(diff_a) / sd
+        sd = float(np.nanstd(pooled, ddof=1))
+        dev_b = abs(diff_b) if (sd == 0 or np.isnan(sd)) else abs(diff_b) / sd
+        dev_a = abs(diff_a) if (sd == 0 or np.isnan(sd)) else abs(diff_a) / sd
 
-    # 개선율: 이전 절대편차 대비 이후 절대편차 감소 비율
     mean_gain = (dev_b - dev_a) / (dev_b + eps)
 
     return dict(
-        mean_diff_before=diff_b,
-        mean_diff_after=diff_a,
-        mean_dev_before_norm=dev_b,
-        mean_dev_after_norm=dev_a,
-        mean_gain=mean_gain,
+        mean_편차_전=diff_b,
+        mean_편차_후=diff_a,
+        평균목표편차_전_정규화=dev_b,
+        평균목표편차_후_정규화=dev_a,
+        평균목표접근개선율=mean_gain,
     )
 
 
@@ -127,17 +104,11 @@ def _stability_stats(
 ) -> dict:
     """분산 안정성: 표준편차 감소율.
 
-    원리:
-        - 산포가 줄수록 좋음.
-        - 항목 간 비교를 위해 가능하면 스펙폭으로 정규화해서 보고치 제공.
-        - 개선율은 정규화 유무와 무관하게 일관(+면 개선).
-
-    Returns:
-        {
-            'std_before', 'std_after',            # 비정규화 표준편차
-            'std_before_norm', 'std_after_norm',  # 스펙폭 정규화 표준편차
-            'std_gain'                            # 개선율(+ 좋음)
-        }
+    정의:
+      std_gain = 1 - (std_after / (std_before + eps))
+      → before 대비 after의 **상대 감소율** (+면 산포 감소=안정화)
+    보고값:
+      - 표준편차(전/후), 정규화 표준편차(전/후: (U-L)로 나눈 값)
     """
     b = _extract_numeric_series(before).to_numpy(dtype=float)
     a = _extract_numeric_series(after).to_numpy(dtype=float)
@@ -149,16 +120,16 @@ def _stability_stats(
         std_b_n = std_b / spec_w
         std_a_n = std_a / spec_w
     else:
-        std_b_n, std_a_n = std_b, std_a  # 정규화 불가 시 원단위로 보고
+        std_b_n, std_a_n = std_b, std_a
 
-    std_gain = 1.0 - (std_a + eps) / (std_b + eps)
+    std_gain = 1.0 - (std_a / (std_b + eps))
 
     return dict(
-        std_before=std_b,
-        std_after=std_a,
-        std_before_norm=std_b_n,
-        std_after_norm=std_a_n,
-        std_gain=std_gain,
+        표준편차_전=std_b,
+        표준편차_후=std_a,
+        표준편차_전_정규화=std_b_n,
+        표준편차_후_정규화=std_a_n,
+        산포개선율=std_gain,
     )
 
 
@@ -169,28 +140,24 @@ def _rmse_stats(
     spec_w: Optional[float],
     eps: float = 1e-12,
 ) -> dict:
-    """오차 척도: desired 대비 RMSE 감소율.
+    """오차 척도: desired 기준 RMSE 감소율.
 
-    원리:
-        - desired를 기준으로 한 제곱오차 평균의 제곱근(RMSE).
-        - 스펙폭으로 정규화해 항목 간 비교 가능하도록.
-        - 개선율은 +면 개선.
-
-    Returns:
-        {
-            'rmse_before', 'rmse_after',            # 비정규화 RMSE
-            'rmse_before_norm', 'rmse_after_norm',  # 정규화 RMSE
-            'rmse_gain'                             # 개선율(+ 좋음)
-        }
+    정의:
+      rmse_b = sqrt(mean((before - desired)^2))
+      rmse_a = sqrt(mean((after  - desired)^2))
+      rmse_gain = (rmse_b - rmse_a) / (rmse_b + eps)
+      → before 대비 after의 **상대 감소율** (+면 오차 감소=개선)
+    보고값:
+      - RMSE(전/후), 정규화 RMSE(전/후: (U-L)로 나눈 값)
     """
     b = _extract_numeric_series(before).to_numpy(dtype=float)
     a = _extract_numeric_series(after).to_numpy(dtype=float)
 
     if desired is None or np.isnan(desired):
         return dict(
-            rmse_before=np.nan, rmse_after=np.nan,
-            rmse_before_norm=np.nan, rmse_after_norm=np.nan,
-            rmse_gain=np.nan,
+            RMSE_전=np.nan, RMSE_후=np.nan,
+            RMSE_전_정규화=np.nan, RMSE_후_정규화=np.nan,
+            RMSE개선율=np.nan,
         )
 
     rmse_b = float(np.sqrt(np.nanmean((b - desired) ** 2)))
@@ -205,11 +172,11 @@ def _rmse_stats(
     rmse_gain = (rmse_b - rmse_a) / (rmse_b + eps)
 
     return dict(
-        rmse_before=rmse_b,
-        rmse_after=rmse_a,
-        rmse_before_norm=rmse_b_n,
-        rmse_after_norm=rmse_a_n,
-        rmse_gain=rmse_gain,
+        RMSE_전=rmse_b,
+        RMSE_후=rmse_a,
+        RMSE_전_정규화=rmse_b_n,
+        RMSE_후_정규화=rmse_a_n,
+        RMSE개선율=rmse_gain,
     )
 
 
@@ -219,42 +186,36 @@ def _in_spec_stats(
     low: Optional[float],
     upper: Optional[float],
 ) -> dict:
-    """스펙 내 적합도: (L ≤ x ≤ U)의 비율 변화.
+    """스펙 내 적합도: (L ≤ x ≤ U) 비율 및 개선(퍼센트포인트).
 
-    원리:
-        - 스펙 범위가 정의된 항목에서만 의미 있음.
-        - +값이면 합격률 상승.
-
-    Returns:
-        {
-            'in_spec_rate_before', 'in_spec_rate_after', 'in_spec_gain'
-        }
+    정의:
+      p_before = in-spec 비율(전), p_after = in-spec 비율(후)
+      in_spec_pp = (p_after - p_before)   # 퍼센트포인트 차이(0~1 범위를 나중에 100x)
+      → before 대비 after의 **절대 차이** (+면 합격률 상승)
     """
     if (low is None) or (upper is None) or (upper < low):
         return dict(
-            in_spec_rate_before=np.nan,
-            in_spec_rate_after=np.nan,
-            in_spec_gain=np.nan,
+            스펙내율_전=np.nan, 스펙내율_후=np.nan, 스펙내율개선_pp=np.nan,
         )
 
     b = _extract_numeric_series(before)
     a = _extract_numeric_series(after)
 
-    in_b = ((b >= low) & (b <= upper)).mean()
-    in_a = ((a >= low) & (a <= upper)).mean()
+    p_b = float(((b >= low) & (b <= upper)).mean())
+    p_a = float(((a >= low) & (a <= upper)).mean())
 
     return dict(
-        in_spec_rate_before=float(in_b),
-        in_spec_rate_after=float(in_a),
-        in_spec_gain=float(in_a - in_b),
+        스펙내율_전=p_b,
+        스펙내율_후=p_a,
+        스펙내율개선_pp=p_a - p_b,
     )
 
 
 # =========================
-# 메인: 비고별 통계 DataFrame 산출
+# 메인: 비고별 계산 → “값만” 담긴 보고용 DataFrame
 # =========================
 
-def compute_quality_stats(
+def compute_quality_stats_report(
     out: pd.DataFrame,
     spec: Dict[str, Sequence],
     *,
@@ -262,18 +223,15 @@ def compute_quality_stats(
     col_after: str  = "최적화후품질값",
     eps: float = 1e-12,
 ) -> pd.DataFrame:
-    """비고별로 4대 지표(중심 접근도, 분산 안정성, 오차 척도, 스펙내 적합도)를 계산해 DataFrame 반환.
+    """비고별 4대 지표를 **값만** 담은 한국어 컬럼 DataFrame으로 반환.
 
-    Google style:
-        Args:
-            out: 열에 '비고', col_before, col_after 포함한 DataFrame.
-            spec: '비고' → [low, desired, upper].
-            col_before: 최적화 전 값 컬럼명.
-            col_after: 최적화 후 값 컬럼명.
-            eps: 0-division 방지용 작은 값.
-
-        Returns:
-            비고별 지표가 정리된 DataFrame.
+    포함 항목(모두 값만; 판단 로직 없음):
+      - 스펙: 스펙하한, 목표값, 스펙상한, 스펙폭
+      - 중심 접근도: mean_편차(전/후), 평균목표편차_전/후_정규화, 평균목표접근개선율
+      - 분산 안정성: 표준편차(전/후), 표준편차_전/후_정규화, 산포개선율
+      - 오차 척도: RMSE(전/후), RMSE_전/후_정규화, RMSE개선율
+      - 스펙내 적합도: 스펙내율(전/후), 스펙내율개선(pp)
+      - 보조: 샘플수(전/후)
     """
     rows: List[dict] = []
 
@@ -283,46 +241,68 @@ def compute_quality_stats(
         if key in spec:
             low, desired, upper = _parse_spec_item(spec[key])
 
-        spec_w = _spec_width(low, upper)  # 스펙폭(정규화 기반)
+        spec_w = _spec_width(low, upper)
 
-        # 각 지표 계산
-        cp  = _central_proximity_stats(g[col_before], g[col_after], desired, spec_w, eps=eps)
-        stb = _stability_stats(g[col_before], g[col_after], spec_w, eps=eps)
-        rms = _rmse_stats(g[col_before], g[col_after], desired, spec_w, eps=eps)
-        isp = _in_spec_stats(g[col_before], g[col_after], low, upper)
+        # 원시 값 추출(샘플수 보고용)
+        b_raw = _extract_numeric_series(g[col_before])
+        a_raw = _extract_numeric_series(g[col_after])
+
+        cp  = _central_proximity_stats(b_raw, a_raw, desired, spec_w, eps=eps)
+        st  = _stability_stats(b_raw, a_raw, spec_w, eps=eps)
+        rm  = _rmse_stats(b_raw, a_raw, desired, spec_w, eps=eps)
+        isp = _in_spec_stats(b_raw, a_raw, low, upper)
 
         row = {
             "비고": remark,
-            "low": low, "desired": desired, "upper": upper, "spec_width": spec_w,
+            "스펙하한": low, "목표값": desired, "스펙상한": upper, "스펙폭": spec_w,
             # 중심 접근도
-            "mean_diff_before": cp["mean_diff_before"],
-            "mean_diff_after":  cp["mean_diff_after"],
-            "mean_dev_before_norm": cp["mean_dev_before_norm"],
-            "mean_dev_after_norm":  cp["mean_dev_after_norm"],
-            "mean_gain": cp["mean_gain"],
+            "mean_편차_전": cp["mean_편차_전"],
+            "mean_편차_후": cp["mean_편차_후"],
+            "평균목표편차_전_정규화": cp["평균목표편차_전_정규화"],
+            "평균목표편차_후_정규화": cp["평균목표편차_후_정규화"],
+            "평균목표접근개선율": cp["평균목표접근개선율"],  # (dev_b - dev_a) / dev_b
             # 분산 안정성
-            "std_before": stb["std_before"],
-            "std_after":  stb["std_after"],
-            "std_before_norm": stb["std_before_norm"],
-            "std_after_norm":  stb["std_after_norm"],
-            "std_gain": stb["std_gain"],
+            "표준편차_전": st["표준편차_전"],
+            "표준편차_후": st["표준편차_후"],
+            "표준편차_전_정규화": st["표준편차_전_정규화"],
+            "표준편차_후_정규화": st["표준편차_후_정규화"],
+            "산포개선율": st["산포개선율"],              # 1 - std_after/std_before
             # 오차 척도
-            "rmse_before": rms["rmse_before"],
-            "rmse_after":  rms["rmse_after"],
-            "rmse_before_norm": rms["rmse_before_norm"],
-            "rmse_after_norm":  rms["rmse_after_norm"],
-            "rmse_gain": rms["rmse_gain"],
+            "RMSE_전": rm["RMSE_전"],
+            "RMSE_후": rm["RMSE_후"],
+            "RMSE_전_정규화": rm["RMSE_전_정규화"],
+            "RMSE_후_정규화": rm["RMSE_후_정규화"],
+            "RMSE개선율": rm["RMSE개선율"],              # (rmse_b - rmse_a)/rmse_b
             # 스펙 내 적합도
-            "in_spec_rate_before": isp["in_spec_rate_before"],
-            "in_spec_rate_after":  isp["in_spec_rate_after"],
-            "in_spec_gain": isp["in_spec_gain"],
+            "스펙내율_전": isp["스펙내율_전"],
+            "스펙내율_후": isp["스펙내율_후"],
+            "스펙내율개선_pp": isp["스펙내율개선_pp"],   # p_after - p_before
+            # 보조
+            "샘플수_전": int(b_raw.notna().sum()),
+            "샘플수_후": int(a_raw.notna().sum()),
         }
         rows.append(row)
 
-    result = pd.DataFrame(rows)
-    # 정렬: 스펙 유무/비고명 기준 (필요 시 수정)
-    return result.sort_values(by=["비고"]).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("비고").reset_index(drop=True)
 
+    # 가독성: 스펙내율은 %로 보고할 일이 많아 보조 컬럼 추가(원본은 0~1 유지)
+    df["스펙내율_전(%)"] = (df["스펙내율_전"] * 100).astype(float)
+    df["스펙내율_후(%)"] = (df["스펙내율_후"] * 100).astype(float)
+    df["스펙내율개선(pp)"] = (df["스펙내율개선_pp"] * 100).astype(float)
+
+    # 최종 열 순서(값만, 판단 없음)
+    ordered_cols = [
+        "비고",
+        "스펙하한", "목표값", "스펙상한", "스펙폭",
+        "평균목표편차_전_정규화", "평균목표편차_후_정규화", "평균목표접근개선율",
+        "표준편차_전_정규화", "표준편차_후_정규화", "산포개선율",
+        "RMSE_전_정규화", "RMSE_후_정규화", "RMSE개선율",
+        "스펙내율_전(%)", "스펙내율_후(%)", "스펙내율개선(pp)",
+        "mean_편차_전", "mean_편차_후", "표준편차_전", "표준편차_후", "RMSE_전", "RMSE_후",
+        "스펙내율_전", "스펙내율_후", "스펙내율개선_pp",
+        "샘플수_전", "샘플수_후",
+    ]
+    return df[ordered_cols]
 
 from __future__ import annotations
 
