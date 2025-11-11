@@ -1,4 +1,188 @@
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence, Tuple
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+
+
+# =========================
+# Keep existing structure
+# =========================
+
+def _ensure_dir(p: Path) -> None:
+    """Create directory if not exists."""
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_filename(text: str) -> str:
+    """Keep filename-safe characters only."""
+    return "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(text))
+
+
+def _melt_for_plot(df: pd.DataFrame) -> pd.DataFrame:
+    """Wide→long for plotting three metrics into single 'value' column."""
+    cols = ["품질검사값", "최적화전품질값", "최적화후품질값"]
+    present = [c for c in cols if c in df.columns]
+    return df.melt(
+        id_vars=["heat_lot_no", "라인", "비고"],
+        value_vars=present,
+        var_name="metric",
+        value_name="value",
+    )
+
+
+# =========================
+# New helpers (shapes + y-range lock)
+# =========================
+
+def _parse_spec(spec_item: Sequence) -> Tuple[float | None, float | None, float | None]:
+    """Parse [low, desired, upper] into numeric tuple."""
+    def _num(x):
+        return None if x is None else pd.to_numeric(x, errors="coerce")
+    low = _num(spec_item[0]) if len(spec_item) > 0 else None
+    desired = _num(spec_item[1]) if len(spec_item) > 1 else None
+    upper = _num(spec_item[2]) if len(spec_item) > 2 else None
+    return (None if pd.isna(low) else float(low),
+            None if pd.isna(desired) else float(desired),
+            None if pd.isna(upper) else float(upper))
+
+
+def _add_spec_shapes(
+    fig: go.Figure,
+    x_vals: List[str],
+    low: float | None,
+    desired: float | None,
+    upper: float | None,
+    band_color: str = "rgba(0,200,0,0.15)",
+    target_color: str = "green",
+) -> None:
+    """Add spec band(line-independent) and target line via layout.shapes (no autorange impact)."""
+    if not x_vals:
+        return
+    x0, x1 = x_vals[0], x_vals[-1]
+
+    # 허용 밴드(rect)
+    if (low is not None) and (upper is not None) and (upper >= low):
+        fig.add_shape(
+            type="rect", xref="x", yref="y",
+            x0=x0, x1=x1, y0=low, y1=upper,
+            line=dict(width=0),
+            fillcolor=band_color,
+            layer="below",
+        )
+
+    # 목표선(line)
+    if desired is not None:
+        fig.add_shape(
+            type="line", xref="x", yref="y",
+            x0=x0, x1=x1, y0=desired, y1=desired,
+            line=dict(color=target_color, width=2),
+            layer="above",
+        )
+
+
+def _lock_y_range_to_data(
+    fig: go.Figure,
+    y_values: np.ndarray,
+    pad_ratio: float = 0.08,
+) -> None:
+    """Fix y-axis to data range (optional) so far-away specs won't compress traces."""
+    y = y_values[~np.isnan(y_values)]
+    if y.size == 0:
+        return
+    y_min, y_max = float(np.min(y)), float(np.max(y))
+    pad = (y_max - y_min) * pad_ratio if y_max > y_min else max(1e-6, y_max * pad_ratio)
+    fig.update_yaxes(range=[y_min - pad, y_max + pad])
+
+
+# =========================
+# Drop-in: keep names & flow
+# =========================
+
+def _plot_single_group(
+    melted: pd.DataFrame,
+    title: str,
+    spec: Dict[str, List] | None = None,
+    lock_y_to_data: bool = True,
+) -> "px.Figure":
+    """Per-remark line chart with optional spec band/target via shapes."""
+    # LOT 순서를 카테고리 순서로 고정
+    order = pd.unique(melted["heat_lot_no"]).tolist()
+    base = melted.sort_values("heat_lot_no", kind="stable")
+
+    fig = px.line(
+        base, x="heat_lot_no", y="value", color="metric",
+        markers=True, category_orders={"heat_lot_no": order}, title=title,
+    )
+    fig.update_layout(
+        xaxis_title="heat_lot_no",
+        yaxis_title="Value",
+        legend_title="Metric",
+        hovermode="x unified",
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+
+    # spec을 shapes로 오버레이(축 자동범위에 영향 없음)
+    if spec is not None:
+        remark_key = str(melted["비고"].iloc[0])
+        if remark_key in spec:
+            low, desired, upper = _parse_spec(spec[remark_key])
+            _add_spec_shapes(fig, order, low, desired, upper)
+
+    # 선택: 실제 데이터 범위 기준으로 y축 고정
+    if lock_y_to_data:
+        _lock_y_range_to_data(fig, base["value"].to_numpy(), pad_ratio=0.08)
+
+    return fig
+
+
+def export_quality_plots(
+    out_df: pd.DataFrame,
+    by_line: bool = True,
+    output_dir: str | Path = ".",
+    width: int = 1280,
+    height: int = 720,
+    scale: int = 2,
+    spec: Dict[str, List] | None = None,   # ⬅️ 추가: remark → [low, desired, upper]
+    lock_y_to_data: bool = True,           # ⬅️ 추가: 축 고정 옵션
+) -> None:
+    """Export per-remark Plotly charts as PNG, with optional spec band/target (shapes)."""
+    df = out_df.copy()
+    base_dir = Path(output_dir).resolve()
+    _ensure_dir(base_dir)
+
+    melted = _melt_for_plot(df)
+    if melted.empty:
+        return
+
+    if by_line:
+        for line, g_line in melted.groupby("라인", dropna=False):
+            line_label = "NaN" if pd.isna(line) else str(int(line))
+            line_dir = base_dir / f"라인_{_safe_filename(line_label)}"
+            _ensure_dir(line_dir)
+
+            for remark, g in g_line.groupby("비고", dropna=False):
+                remark_label = "NaN" if pd.isna(remark) else str(remark)
+                title = f"[라인 {line_label}] 비고: {remark_label}"
+                fig = _plot_single_group(g, title, spec=spec, lock_y_to_data=lock_y_to_data)
+                fname = f"line_{line_label}__remark_{_safe_filename(remark_label)}.png"
+                fig.write_image(str(line_dir / fname), width=width, height=height, scale=scale)
+    else:
+        for remark, g in melted.groupby("비고", dropna=False):
+            remark_label = "NaN" if pd.isna(remark) else str(remark)
+            title = f"[전체 데이터] 비고: {remark_label}"
+            fig = _plot_single_group(g, title, spec=spec, lock_y_to_data=lock_y_to_data)
+            fname = f"total__remark_{_safe_filename(remark_label)}.png"
+            fig.write_image(str(base_dir / fname), width=width, height=height, scale=scale)
+
+
+
+
+
+from __future__ import annotations
 from typing import Dict, List, Union
 import pandas as pd
 
