@@ -1,3 +1,282 @@
+from __future__ import annotations
+
+from typing import List
+
+import numpy as np
+import pandas as pd
+
+
+# ----------------------------------------------------------------------
+# 내부 유틸: f::* 컬럼 자동 탐색 + F 행렬 준비
+# ----------------------------------------------------------------------
+def _get_f_cols(pareto_df: pd.DataFrame) -> List[str]:
+    """pareto_df에서 f::* 형태의 목표 컬럼 목록을 찾는다.
+
+    Args:
+        pareto_df: _collect_pareto 결과 DataFrame.
+
+    Returns:
+        f_cols: 'f::' prefix를 가진 컬럼 이름 리스트.
+
+    Raises:
+        ValueError: f:: prefix를 가진 컬럼이 하나도 없을 때.
+    """
+    f_cols = [c for c in pareto_df.columns if c.startswith("f::")]
+    if not f_cols:
+        raise ValueError("pareto_df에 'f::'로 시작하는 목표 컬럼이 없습니다.")
+    return f_cols
+
+
+def _prepare_F(df: pd.DataFrame, f_cols: List[str]) -> np.ndarray:
+    """목표 컬럼들로부터 numpy 행렬을 생성한다 (모두 minimize 기준).
+
+    Args:
+        df: 후보 해들을 포함한 DataFrame.
+        f_cols: Pareto 비교에 사용할 목표 컬럼 이름 리스트.
+
+    Returns:
+        shape: (N, M) 의 numpy 배열.
+    """
+    return df[f_cols].to_numpy(dtype=float)
+
+
+# ----------------------------------------------------------------------
+# Pareto rank 계산 (non-dominated sorting)
+# ----------------------------------------------------------------------
+def _dominates(a: np.ndarray, b: np.ndarray) -> bool:
+    """a가 b를 Pareto 의미에서 지배하는지 여부를 반환한다 (모두 minimize 기준).
+
+    Args:
+        a: shape (M,) 의 목표값 벡터.
+        b: shape (M,) 의 목표값 벡터.
+
+    Returns:
+        True이면 a가 b를 Pareto 정의상 지배(dominates)함.
+    """
+    # 모든 목표에서 a <= b 이고, 적어도 하나는 a < b
+    return np.all(a <= b) and np.any(a < b)
+
+
+def _pareto_ranks(df: pd.DataFrame, f_cols: List[str]) -> np.ndarray:
+    """각 해의 Pareto rank(1,2,...)를 계산한다.
+
+    Args:
+        df: 후보 해들을 포함한 DataFrame (예: pareto_df).
+        f_cols: Pareto 비교에 사용할 목표 컬럼 이름 리스트.
+
+    Returns:
+        길이 N의 numpy 배열. 각 원소는 해당 행의 Pareto rank (1부터 시작).
+    """
+    F = _prepare_F(df, f_cols)
+    n = F.shape[0]
+
+    if n == 0:
+        return np.array([], dtype=int)
+
+    # 각 점이 지배하는 점 목록, 지배당하는 개수
+    S: List[List[int]] = [[] for _ in range(n)]
+    n_dom = np.zeros(n, dtype=int)
+    ranks = np.zeros(n, dtype=int)
+
+    # 지배 관계 계산 (O(N^2))
+    for p in range(n):
+        for q in range(p + 1, n):
+            if _dominates(F[p], F[q]):
+                S[p].append(q)
+                n_dom[q] += 1
+            elif _dominates(F[q], F[p]):
+                S[q].append(p)
+                n_dom[p] += 1
+
+    # 1차 front (지배당하지 않는 점들)
+    current_front: List[int] = []
+    for p in range(n):
+        if n_dom[p] == 0:
+            ranks[p] = 1
+            current_front.append(p)
+
+    # 나머지 front들 (껍질 벗기기)
+    front_rank = 1
+    while current_front:
+        next_front: List[int] = []
+        for p in current_front:
+            for q in S[p]:
+                n_dom[q] -= 1
+                if n_dom[q] == 0:
+                    ranks[q] = front_rank + 1
+                    next_front.append(q)
+        front_rank += 1
+        current_front = next_front
+
+    return ranks
+
+
+# ----------------------------------------------------------------------
+# 공개 함수 1: 대표 TOP N 선택 (score 컬럼 포함)
+# ----------------------------------------------------------------------
+def select_top_n(pareto_df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """Pareto 1차 front에서 대표 N개 해를 선택한다.
+
+    전략:
+        1. pareto_df에서 f::* 목표 컬럼을 자동으로 찾는다.
+        2. 해당 목표들 기준으로 Pareto rank(1,2,...)를 계산한다.
+        3. 1차 front(ranks == 1)만 사용한다.
+           - 만약 1차 front가 비어 있으면 전체를 사용한다.
+        4. 각 목표를 [0,1]로 min-max 정규화한다 (0: best, 1: worst).
+        5. 정규화된 값의 합을 score로 사용하고, score가 작은 순서대로 N개 선택한다.
+        6. N보다 후보가 적으면 있는 만큼만 반환한다.
+
+    주의:
+        - 반환되는 DataFrame은 원본 pareto_df의 index를 그대로 유지한다.
+        - 반환 DataFrame에는 score 컬럼이 포함된다.
+        - pareto_df가 비어 있으면 빈 DataFrame을 그대로 반환한다.
+
+    Args:
+        pareto_df: _collect_pareto에서 생성된 Pareto 해 DataFrame.
+        n: 선택할 대표 해 개수 (0 이하면 0으로 취급).
+
+    Returns:
+        대표 N개 해를 모은 DataFrame (원본 pareto_df의 부분집합).
+    """
+    if pareto_df.empty:
+        return pareto_df.copy()
+
+    # f::* 컬럼 자동 탐색
+    f_cols = _get_f_cols(pareto_df)
+
+    # Pareto rank 계산
+    ranks = _pareto_ranks(pareto_df, f_cols)
+
+    # 1차 front만 사용 (없으면 전체 사용)
+    mask_front1 = ranks == 1
+    if mask_front1.any():
+        df_front = pareto_df.loc[mask_front1].copy()
+    else:
+        df_front = pareto_df.copy()
+
+    total = len(df_front)
+    if total == 0:
+        return df_front
+
+    # 사용할 개수 처리 (n이 total보다 크면 total까지)
+    n_eff = max(int(n), 0)
+    if n_eff == 0:
+        # 동일한 컬럼 구조를 가진 빈 DataFrame 반환
+        return df_front.iloc[0:0]
+
+    k = min(n_eff, total)
+
+    # 목표 행렬 준비
+    F = _prepare_F(df_front, f_cols)
+
+    # min-max 정규화 (0: best, 1: worst)
+    f_min = F.min(axis=0)
+    f_max = F.max(axis=0)
+    denom = np.where(f_max > f_min, f_max - f_min, 1.0)  # 분모 0 방지
+    F_norm = (F - f_min) / denom
+
+    # score: 정규화된 값의 합 (작을수록 전체적으로 좋은 해)
+    scores = F_norm.sum(axis=1)
+
+    # score를 컬럼으로 추가 (index 정렬 그대로 유지)
+    df_front = df_front.assign(score=scores)
+
+    # score 오름차순으로 정렬 후 상위 k개 선택
+    order = np.argsort(scores)
+    selected_pos = order[:k]
+
+    # iloc 사용해도 index는 원본 유지
+    result = df_front.iloc[selected_pos]
+    return result
+
+
+# ----------------------------------------------------------------------
+# 공개 함수 2: Knee point K개 선택 (knee_score 컬럼 포함)
+# ----------------------------------------------------------------------
+def _knee_points(pareto_df: pd.DataFrame, k: int) -> pd.DataFrame:
+    """Pareto 1차 front에서 knee point 후보 K개를 선택한다.
+
+    간단한 heuristic:
+        1. pareto_df에서 f::* 목표 컬럼을 자동으로 찾는다.
+        2. Pareto rank를 계산해서 1차 front만 사용한다.
+           - 만약 1차 front가 비어 있으면 전체를 사용한다.
+        3. 각 목표를 [0,1]로 min-max 정규화한다.
+           - 0: ideal (가장 좋은 값), 1: nadir (가장 나쁜 값).
+        4. ideal = (0,...,0), nadir = (1,...,1)라고 보고,
+           - d_ideal = ||F_norm - 0|| (ideal까지 거리)
+           - d_nadir = ||F_norm - 1|| (nadir까지 거리)
+           - knee_score = d_nadir / (d_ideal + eps)
+        5. knee_score가 큰 점일수록
+           "나쁜 쪽에서는 멀고, 좋은 쪽에는 상대적으로 가까운"
+           무릎점에 가깝다고 보고 상위 K개 선택한다.
+        6. K보다 후보가 적으면 있는 만큼만 반환한다.
+
+    주의:
+        - 반환되는 DataFrame은 원본 pareto_df의 index를 그대로 유지한다.
+        - 반환 DataFrame에는 knee_score 컬럼이 포함된다.
+        - pareto_df가 비어 있으면 빈 DataFrame을 그대로 반환한다.
+
+    Args:
+        pareto_df: _collect_pareto에서 생성된 Pareto 해 DataFrame.
+        k: 선택할 knee point 개수 (0 이하면 0으로 취급).
+
+    Returns:
+        knee point 후보 K개를 모은 DataFrame (원본 pareto_df의 부분집합).
+    """
+    if pareto_df.empty:
+        return pareto_df.copy()
+
+    # f::* 컬럼 자동 탐색
+    f_cols = _get_f_cols(pareto_df)
+
+    # Pareto rank 계산
+    ranks = _pareto_ranks(pareto_df, f_cols)
+
+    # 1차 front만 사용 (없으면 전체 사용)
+    mask_front1 = ranks == 1
+    if mask_front1.any():
+        df_front = pareto_df.loc[mask_front1].copy()
+    else:
+        df_front = pareto_df.copy()
+
+    total = len(df_front)
+    if total == 0:
+        return df_front
+
+    # 사용할 개수 처리
+    k_eff = max(int(k), 0)
+    if k_eff == 0:
+        return df_front.iloc[0:0]
+
+    kk = min(k_eff, total)
+
+    # 목표 행렬 준비
+    F = _prepare_F(df_front, f_cols)
+
+    # [0,1] 정규화
+    f_min = F.min(axis=0)
+    f_max = F.max(axis=0)
+    denom = np.where(f_max > f_min, f_max - f_min, 1.0)
+    F_norm = (F - f_min) / denom
+
+    # ideal = (0,...,0), nadir = (1,...,1)
+    d_ideal = np.linalg.norm(F_norm, axis=1)
+    d_nadir = np.linalg.norm(F_norm - 1.0, axis=1)
+
+    eps = 1e-9
+    knee_score = d_nadir / (d_ideal + eps)
+
+    # knee_score를 컬럼으로 추가
+    df_front = df_front.assign(knee_score=knee_score)
+
+    # knee_score 내림차순으로 정렬 후 상위 kk개 선택
+    order = np.argsort(-knee_score)
+    selected_pos = order[:kk]
+
+    result = df_front.iloc[selected_pos]
+    return result
+
+
 # viz_pymoo.py
 from __future__ import annotations
 
