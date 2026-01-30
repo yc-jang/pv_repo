@@ -1,0 +1,27 @@
+E2E_System_Root/
+│
+├── merge_all.py            # [Main] 전체 데이터 병합 프로세스 실행
+├── run_01.py               # [Main] E2E 품질 예측 실행 (Inference)
+├── run_02.py               # [Main] E2E 품질 최적화 실행 (Optimization)
+├── train.py                # [Main] 예측 모델 학습 실행
+│
+├── source/                 # 핵심 로직 및 유틸리티
+│   ├── fonts/              # 시각화용 폰트 리소스
+│   ├── merging/            # (13 files) LOT, 원료, 공정 데이터 전처리 모듈
+│   ├── optimizer/          # (7 files) 최적화 알고리즘 구현 코드
+│   └── runner/             # (2 files) 모델 로드 및 예측 수행 코드
+│
+├── models/                 # 학습 완료된 모델 파일 저장소
+│   └── running/
+│       ├── N86_bulkA/      # (구성: Target Model .pkl)
+│       ├── N86_bulkB/      # (구성: Target Model .pkl)
+│       └── N87_bulkA/      # (구성: Target Model .pkl)
+│
+└── [Data_Folders]          # 타겟별 학습 데이터 및 병합 스크립트
+    ├── N86_BulkA/
+    │   ├── 2023_1/         # (Data) 개발계 반기 데이터 (Historical)
+    │   ├── 2025_1/         # (Data) 최신 반기 데이터
+    │   ├── PRDT/           # (Data) MES 검사 품질 이력
+    │   └── N86_BulkA.py    # (Script) 해당 타겟 데이터 병합 코드
+    ├── N86_BulkB/          # (상동)
+    └── N87_BulkA/          # (상동)
