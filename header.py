@@ -68,3 +68,41 @@ def flatten_multi_header(df: pd.DataFrame, sep: str = "_") -> pd.DataFrame:
     df_result.columns = new_columns
     
     return df_result
+
+
+import pandas as pd
+from typing import Dict, Set, Iterable
+
+def build_lot_to_setlot_mapping(
+    self, 
+    df_target_lots: pd.DataFrame, 
+    source_to_target_map: Dict[str, Iterable[str]], 
+    target_lot_col: str, 
+    setlot_col: str
+) -> Dict[str, Set[str]]:
+    """
+    Source Lot을 기반으로 연관된 유효 SetLot(NaN 제외)들의 집합(Set)을 매핑하여 반환합니다.
+    """
+    
+    # 1. [최적화 핵심] 사전에 NaN 제거 (Fail-Fast & Pre-filtering)
+    # 나중에 하나씩 isna()로 검사할 필요 없이, 처음부터 SetLot이 없는 행을 날려버립니다.
+    df_valid = df_target_lots.dropna(subset=[setlot_col])
+    
+    # 2. [중간 매핑] Target Lot -> {SetLot1, SetLot2, ...}
+    # dropna를 거쳤으므로 이 딕셔너리의 value(set)에는 절대 NaN이 들어가지 않습니다.
+    target_to_setlots = df_valid.groupby(target_lot_col)[setlot_col].apply(set).to_dict()
+    
+    # 3. [최종 병합] Source Lot -> {SetLot1, SetLot2, ...} (Fast Set Union)
+    source_to_setlot_map = {}
+    for source_lot, target_lots in source_to_target_map.items():
+        
+        # set().union()은 파이썬 내부 C단에서 처리되므로 리스트 sum()보다 압도적으로 빠릅니다.
+        # .get(t, set())을 사용하여 target_to_setlots에 키가 없을 경우 빈 set을 반환해 에러를 방지합니다.
+        combined_setlots = set().union(
+            *(target_to_setlots.get(t, set()) for t in target_lots)
+        )
+        
+        source_to_setlot_map[source_lot] = combined_setlots
+        
+    return source_to_setlot_map
+
