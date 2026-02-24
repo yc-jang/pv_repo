@@ -106,3 +106,41 @@ def build_lot_to_setlot_mapping(
         
     return source_to_setlot_map
 
+
+import pandas as pd
+from typing import Dict, Set
+
+def compute_total_stop_time_df(heat_to_bake_map: Dict[str, Set[str]], stop_file: pd.DataFrame) -> pd.DataFrame:
+    """
+    heat_to_bake_map의 각 키(Heat)에 할당된 생산Lot번호들의 
+    경과시간(분)을 모두 합산하고, 전체 총합을 포함한 데이터프레임으로 반환합니다.
+    """
+    result_data = []
+    
+    for heat, lot_set in heat_to_bake_map.items():
+        # 1. stop_file에서 '생산Lot번호'가 현재 lot_set에 포함되는 행만 필터링
+        mask = stop_file['생산Lot번호'].isin(lot_set)
+        
+        # 2. 필터링된 행들의 '경과시간(분)'을 모두 더함 (.sum()은 기본적으로 NaN을 0으로 취급하여 안전함)
+        total_time = stop_file.loc[mask, '경과시간(분)'].sum()
+        
+        # 3. 결과를 리스트에 저장
+        result_data.append({
+            'Heat': heat,
+            '총 정지시간(분)': total_time
+        })
+        
+    # 4. 리스트를 데이터프레임으로 변환
+    df_result = pd.DataFrame(result_data)
+    
+    # 5. 전체 총합 계산 및 하단에 행 추가
+    if not df_result.empty:
+        grand_total = df_result['총 정지시간(분)'].sum()
+        total_row = pd.DataFrame({
+            'Heat': ['[전체 총합]'],
+            '총 정지시간(분)': [grand_total]
+        })
+        df_result = pd.concat([df_result, total_row], ignore_index=True)
+        
+    return df_result
+
