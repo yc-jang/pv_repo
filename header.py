@@ -144,3 +144,58 @@ def compute_total_stop_time_df(heat_to_bake_map: Dict[str, Set[str]], stop_file:
         
     return df_result
 
+import pandas as pd
+import re
+
+def read_clipboard_robustly(sep: str = '\t', force_rename_duplicates: bool = False) -> pd.DataFrame:
+    """
+    클립보드 데이터를 읽어오면서 데이터 유실 없이 원본 CSV 형태를 복원하는 함수.
+    
+    Args:
+        sep (str): 구분자. 엑셀/그리드 복사 시 '\t', 쉼표 구분 텍스트 복사 시 ','
+        force_rename_duplicates (bool): True일 경우 Pandas가 강제로 붙인 '.1', '.2' 접미사를 강제로 제거함.
+                                        (주의: 컬럼명이 중복되면 이후 데이터 처리에 문제가 생길 수 있음)
+    """
+    try:
+        # 1. 클립보드에서 데이터 읽기 (원본 텍스트의 앞뒤 공백 스트립 등 기본 처리 포함)
+        df = pd.read_clipboard(sep=sep)
+    except Exception as e:
+        print(f"클립보드를 읽을 수 없습니다. 데이터가 복사되었는지 확인하세요.\n에러: {e}")
+        return pd.DataFrame()
+
+    # 2. 여백 복사로 인해 생성된 '완전히 빈' 행/열 제거
+    df = df.dropna(axis=0, how='all')
+    df = df.dropna(axis=1, how='all')
+
+    # 3. 'Unnamed' 컬럼 안전 처리 (가장 중요한 부분)
+    # 무작정 지우지 않고, 데이터가 '진짜로 비어있는지' 확인 후 제거합니다.
+    unnamed_cols = [col for col in df.columns if str(col).startswith('Unnamed')]
+    cols_to_drop = []
+    
+    for col in unnamed_cols:
+        # 해당 열이 모두 NaN이거나 빈 문자열('')인 경우에만 삭제 후보로 등록
+        if df[col].isna().all() or (df[col] == '').all():
+            cols_to_drop.append(col)
+            
+    df = df.drop(columns=cols_to_drop)
+
+    # 4. '.1', '.2' 등 중복 컬럼명 접미사 제거 (옵션)
+    if force_rename_duplicates:
+        new_cols = []
+        for col in df.columns:
+            # 정규식: 끝이 '.숫자'로 끝나는 패턴 찾아서 빈 문자열로 치환
+            clean_col = re.sub(r'\.\d+$', '', str(col))
+            new_cols.append(clean_col)
+        df.columns = new_cols
+
+    # 5. 인덱스 리셋 (복사 과정에서 엉킨 인덱스를 0부터 깔끔하게 재정렬)
+    df = df.reset_index(drop=True)
+
+    return df
+
+# --- 실행 예시 ---
+# 엑셀/웹 그리드에서 복사했을 때 (기본값 탭 구분자)
+# df_loaded = read_clipboard_robustly()
+
+# 메모장에서 쉼표(,)로 구분된 CSV 텍스트를 복사했을 때
+# df_loaded = read_clipboard_robustly(sep=',')
