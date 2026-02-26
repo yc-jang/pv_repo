@@ -199,3 +199,38 @@ def read_clipboard_robustly(sep: str = '\t', force_rename_duplicates: bool = Fal
 
 # 메모장에서 쉼표(,)로 구분된 CSV 텍스트를 복사했을 때
 # df_loaded = read_clipboard_robustly(sep=',')
+
+import pandas as pd
+import re
+
+def read_clipboard_for_csv_export(sep='\t') -> pd.DataFrame:
+    """
+    클립보드 데이터를 읽고, Pandas가 강제로 생성한 빈 헤더(Unnamed)와 
+    중복 접미사(.1)를 원상 복구하여 CSV 저장에 최적화합니다.
+    """
+    # 1. 클립보드 데이터 읽기 (첫 줄을 헤더로 인식)
+    df = pd.read_clipboard(sep=sep)
+    
+    # 2. 컬럼명 원상 복구 로직
+    new_columns = []
+    for col in df.columns:
+        col_str = str(col)
+        
+        # Pandas가 빈 헤더에 강제로 붙인 이름 처리 -> 빈 문자열로 치환
+        if "Unnamed" in col_str:
+            new_columns.append("")
+        else:
+            # Pandas가 중복 헤더에 강제로 붙인 '.1', '.2' 등 제거
+            # 정규식: 끝이 '.숫자'로 끝나는 패턴만 제거하여 원본 이름 복원
+            clean_col = re.sub(r'\.\d+$', '', col_str)
+            new_columns.append(clean_col)
+            
+    # 3. 데이터프레임에 정제된 컬럼명 강제 덮어쓰기
+    # (이렇게 하면 데이터프레임에 빈 문자열("") 컬럼명도 정상적으로 들어갑니다)
+    df.columns = new_columns
+    
+    return df
+
+# --- 실행 및 저장 예시 ---
+# df_clean = read_clipboard_for_csv_export()
+# df_clean.to_csv('original_format.csv', index=False)
