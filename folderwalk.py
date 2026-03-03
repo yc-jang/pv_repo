@@ -122,3 +122,72 @@ class FolderProcessor:
                 final_job_dict[code] = unique_paths
 
         return final_job_dict
+
+
+import logging
+from pathlib import Path
+import pandas as pd
+from typing import Dict, Union, List
+
+logger = logging.getLogger(__name__)
+
+def compare_folder_param(self, folder_dict: Dict[str, Union[str, List[str]]], param_csv: pd.DataFrame) -> bool:
+    """
+    param_csv의 IN 조건 파일 목록과 실제 폴더 순회 결과(folder_dict)를 
+    비교하여 일치 여부를 반환하고, 불일치 시 상세 원인을 로깅합니다.
+    """
+    try:
+        # 1. 대상 데이터 필터링 (명확한 복사본 생성)
+        param_in = param_csv[param_csv["입출력구분"] == "IN"].copy()
+        
+        # [버그 방어 1] 안전한 경로 병합 (구분자 누락 방지)
+        # 폴더명 우측 슬래시 제거, 파일명 좌측 슬래시 제거 후 '/'로 안전하게 연결
+        folder_col = param_in["저장폴더"].astype(str).str.replace("\\", "/", regex=False).str.rstrip("/")
+        file_col = param_in["파일명"].astype(str).str.replace("\\", "/", regex=False).str.lstrip("/")
+        param_in_path = folder_col + "/" + file_col
+
+        # 2. 예외 룰 적용 (P960_PARAM 제외) - na=False로 결측치로 인한 에러 방지
+        mask_valid = ~param_in_path.str.contains("P960_PARAM", case=False, na=False)
+        param_in_path = param_in_path[mask_valid]
+
+        # [버그 방어 2 & 4] 안전한 정규화 및 Set 변환
+        # resolve()의 I/O 병목 대신, Path 객체의 포맷 통일 기능을 활용
+        set_param = {Path(p).resolve() for p in param_in_path}
+
+        # [버그 방어 3] 1:N 구조 (str과 list의 혼재) 완벽 대응 (Flattening)
+        flat_folder_paths = []
+        for paths in folder_dict.values():
+            if isinstance(paths, list):
+                flat_folder_paths.extend(paths)
+            else:
+                flat_folder_paths.append(paths)
+                
+        # 수집된 실제 폴더 경로들도 동일하게 포맷팅
+        set_folder = {Path(p).resolve() for p in flat_folder_paths}
+
+        # 3. 데이터 검증 및 결과 판별
+        is_equal = (set_param == set_folder)
+
+        # [최적화 핵심] 디버깅을 위한 차이점 로깅 (현업 필수 로직)
+        if not is_equal:
+            missing_in_folder = set_param - set_folder
+            extra_in_folder = set_folder - set_param
+            
+            logger.warning("🚨 param_csv와 실제 폴더의 파일 구성이 일치하지 않습니다!")
+            
+            if missing_in_folder:
+                # 너무 길어지지 않게 최대 5개까지만 샘플 출력
+                sample = list(missing_in_folder)[:5]
+                logger.warning(f"  -> param에는 있지만 폴더에는 없는 파일 ({len(missing_in_folder)}개): {sample} ...")
+                
+            if extra_in_folder:
+                sample = list(extra_in_folder)[:5]
+                logger.warning(f"  -> 폴더에는 있지만 param에는 없는 파일 ({len(extra_in_folder)}개): {sample} ...")
+
+        return is_equal
+
+    except Exception as e:
+        logger.error(f"compare_folder_param 실행 중 예기치 않은 오류 발생: {e}")
+        # 검증 로직 자체에서 에러가 나면 안전을 위해 무조건 불일치(False) 처리
+        return False
+
