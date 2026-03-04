@@ -191,3 +191,40 @@ def compare_folder_param(self, folder_dict: Dict[str, Union[str, List[str]]], pa
         # 검증 로직 자체에서 에러가 나면 안전을 위해 무조건 불일치(False) 처리
         return False
 
+from typing import Dict, Union, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+class FolderProcessor:
+    # ... (기존 __init__ 및 walk_folders 등) ...
+
+    def _get_exact_file(self, job_dict: Dict[str, Union[str, List[str]]], job_code: str, target_suffix: str) -> Optional[str]:
+        """
+        str/list가 혼재된 1:N 딕셔너리에서, 특정 job_code의 값 중 
+        원하는 접미사(suffix)로 끝나는 단 하나의 파일 경로를 안전하게 추출합니다.
+        """
+        paths = job_dict.get(job_code)
+        
+        # 1. 키가 존재하지 않거나 값이 비어있으면 안전하게 None 반환
+        if not paths:
+            return None
+
+        # 2. 단일 파일(str)이든 복수 파일(list)이든 무조건 리스트로 평탄화 (타입 에러 방어)
+        if isinstance(paths, str):
+            paths = [paths]
+
+        # 3. 엄격한 매칭 (endswith 활용)
+        # 'OP_CONDITION.csv'로 정확히 끝나는 것만 찾음으로써 _DOWNTIME.csv 등을 완벽히 배제
+        target_upper = target_suffix.upper()
+        matched = [str(p) for p in paths if str(p).upper().endswith(target_upper)]
+
+        # 4. 결과 검증 및 반환
+        if not matched:
+            return None
+            
+        if len(matched) > 1:
+            # 중복 파일이 존재할 경우 현업 작업자에게 경고 알림 (데이터 정합성 모니터링)
+            logger.warning(f"[코드 {job_code}] '{target_suffix}' 매칭 파일이 {len(matched)}개 존재합니다. 우선 첫 번째 파일을 사용합니다: {matched}")
+            
+        return matched[0]
