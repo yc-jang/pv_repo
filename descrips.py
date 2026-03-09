@@ -63,3 +63,62 @@ def extract_drm_excel_to_pickle(input_folder, output_folder):
 # input_directory = './drm_encrypted_files'
 # output_directory = './decrypted_pickles'
 # extract_drm_excel_to_pickle(input_directory, output_directory)
+
+
+import os
+import time
+import pandas as pd
+import xlwings as xw
+
+def extract_drm_excel_with_xlwings(input_folder, output_folder):
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # 1. 엑셀 애플리케이션 백그라운드 실행
+    # 화면에 띄우지 않고 백그라운드에서 실행하여 처리 속도 향상
+    app = xw.App(visible=False)
+
+    try:
+        for filename in os.listdir(input_folder):
+            if filename.endswith(('.xlsx', '.xls')):
+                filepath = os.path.abspath(os.path.join(input_folder, filename))
+
+                try:
+                    # 2. DRM이 걸린 엑셀 문서 열기
+                    wb = app.books.open(filepath)
+                    
+                    # DRM 모듈이 암호를 해독하고 메모리에 데이터를 렌더링할 시간을 부여
+                    time.sleep(2) 
+
+                    sheet = wb.sheets
+
+                    # 3. None 반환 및 에러 방지를 위한 핵심 데이터 추출 로직
+                    # used_range를 직접 호출하지 않고, A1 셀부터 연속된 데이터 영역을 테이블로 인식하여 가져옴
+                    df = sheet.range('A1').options(pd.DataFrame, index=False, expand='table').value
+
+                    if df is not None and not df.empty:
+                        # 4. 데이터프레임 확인 후 Pickle로 직렬화하여 저장
+                        pkl_filename = os.path.splitext(filename) + '.pkl'
+                        pkl_filepath = os.path.join(output_folder, pkl_filename)
+                        
+                        df.to_pickle(pkl_filepath)
+                        print(f"[성공] 데이터프레임 변환 및 피클 저장: {pkl_filename}")
+                    else:
+                        print(f"[실패] 데이터가 비어있거나 None을 반환했습니다: {filename}")
+
+                except Exception as e:
+                    print(f"[오류] {filename} 처리 중 문제 발생: {e}")
+                
+                finally:
+                    # 5. 메모리 누수를 막기 위해 개별 파일을 안전하게 닫기
+                    if 'wb' in locals():
+                        wb.close()
+                        
+    finally:
+        # 6. 모든 작업 완료 후 엑셀 프로세스를 강제로 완전히 종료 (좀비 프로세스 방지)
+        app.kill()
+        print("모든 작업이 완료되어 엑셀 프로세스를 종료했습니다.")
+
+# 사용 예시 (실제 경로로 변경하여 사용하세요)
+# extract_drm_excel_with_xlwings('./drm_encrypted_folder', './decrypted_pickles')
+
